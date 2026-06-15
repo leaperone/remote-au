@@ -152,12 +152,12 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fs.SetOutput(stderr)
 	addr := ":47000"
 	deviceIndex := -1
-	discoveryPort := 47001
+	discoveryPort := 0
 	name := defaultHostname()
 	noDiscovery := false
 	fs.StringVar(&addr, "addr", addr, "audio listen address")
 	fs.IntVar(&deviceIndex, "device", deviceIndex, "playback device index from devices")
-	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
+	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port (0 = auto (47001, 48001, 49001))")
 	fs.StringVar(&name, "name", name, "discovery name")
 	fs.BoolVar(&noDiscovery, "no-discovery", noDiscovery, "disable UDP discovery responder")
 	if err := fs.Parse(args); err != nil {
@@ -236,10 +236,15 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	} else if isLoopbackOnlyTCPAddr(tcpAddr) {
 		fmt.Fprintf(stdout, "discovery disabled: audio listener is loopback-only (%s), so LAN discovery will not advertise it\n", tcpAddr)
 	} else {
+		discoveryPorts := discoveryPortsForFlag(discoveryPort)
+		discoveryConn, actualDiscoveryPort, err := discovery.ListenFirst(discoveryPorts)
+		if err != nil {
+			return fmt.Errorf("discovery responder: %w", err)
+		}
 		advertisedAddr := advertisedDiscoveryAddr(tcpAddr)
-		fmt.Fprintf(stdout, "listening for discovery on UDP :%d as %q\n", discoveryPort, name)
+		fmt.Fprintf(stdout, "listening for discovery on UDP :%d as %q\n", actualDiscoveryPort, name)
 		go func() {
-			if err := discovery.RunResponder(ctx, discoveryPort, tcpAddr.Port, name, advertisedAddr, verboseLogf(stdout, verbose)); err != nil && ctx.Err() == nil {
+			if err := discovery.RunResponderOnConn(ctx, discoveryConn, tcpAddr.Port, name, advertisedAddr, verboseLogf(stdout, verbose)); err != nil && ctx.Err() == nil {
 				discoveryErr <- err
 				stop()
 			}
@@ -264,7 +269,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	to := ""
 	peerName := ""
 	discoverTimeout := 1500 * time.Millisecond
-	discoveryPort := 47001
+	discoveryPort := 0
 	name := defaultHostname()
 	sourceName := "mic"
 	transportName := string(transport.TransportUDP)
@@ -272,7 +277,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fs.StringVar(&to, "to", to, "receiver audio address, for example 127.0.0.1:47000; skips LAN discovery")
 	fs.StringVar(&peerName, "peer", peerName, "discovered receiver name to require; discovery trusts the LAN, so use --to or --peer on untrusted networks")
 	fs.DurationVar(&discoverTimeout, "discover-timeout", discoverTimeout, "UDP discovery timeout")
-	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
+	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port (0 = auto (47001, 48001, 49001))")
 	fs.StringVar(&name, "name", name, "sender name")
 	fs.StringVar(&sourceName, "source", sourceName, "capture source: mic or loopback")
 	fs.StringVar(&transportName, "transport", transportName, "audio transport: udp or tcp")
@@ -297,8 +302,9 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	defer stop()
 
 	if to == "" {
-		fmt.Fprintf(stdout, "discovering receivers on UDP :%d for %s\n", discoveryPort, discoverTimeout)
-		peers, err := discovery.Find(ctx, discoveryPort, discoverTimeout, name, verboseLogf(stdout, verbose))
+		discoveryPorts := discoveryPortsForFlag(discoveryPort)
+		fmt.Fprintf(stdout, "discovering receivers on UDP %s for %s\n", discoveryPortLabel(discoveryPorts), discoverTimeout)
+		peers, err := discovery.FindPorts(ctx, discoveryPorts, discoverTimeout, name, verboseLogf(stdout, verbose))
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -405,6 +411,23 @@ func advertisedDiscoveryAddr(addr *net.TCPAddr) netip.Addr {
 	var raw [4]byte
 	copy(raw[:], ip4)
 	return netip.AddrFrom4(raw)
+}
+
+func discoveryPortsForFlag(port int) []int {
+	if port == 0 {
+		ports := make([]int, len(discovery.DefaultPorts))
+		copy(ports, discovery.DefaultPorts)
+		return ports
+	}
+	return []int{port}
+}
+
+func discoveryPortLabel(ports []int) string {
+	labels := make([]string, 0, len(ports))
+	for _, port := range ports {
+		labels = append(labels, fmt.Sprintf(":%d", port))
+	}
+	return strings.Join(labels, ", ")
 }
 
 func writerLogf(w io.Writer) func(format string, args ...any) {

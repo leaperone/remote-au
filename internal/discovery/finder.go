@@ -38,8 +38,13 @@ type peerInstance struct {
 }
 
 func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name string, logf func(format string, args ...any)) ([]Peer, error) {
-	if discoveryPort <= 0 || discoveryPort > 65535 {
-		return nil, fmt.Errorf("discovery port out of range: %d", discoveryPort)
+	return FindPorts(ctx, []int{discoveryPort}, timeout, name, logf)
+}
+
+func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name string, logf func(format string, args ...any)) ([]Peer, error) {
+	normalizedPorts, err := normalizeDiscoveryPorts(ports)
+	if err != nil {
+		return nil, err
 	}
 	if timeout <= 0 {
 		return nil, fmt.Errorf("discovery timeout must be positive")
@@ -57,11 +62,23 @@ func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name st
 	if err != nil {
 		return nil, fmt.Errorf("listen discovery udp ephemeral: %w", err)
 	}
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatcher:
+		}
+	}()
 	defer func() {
+		close(stopWatcher)
 		_ = conn.Close()
+		<-watcherDone
 	}()
 
-	targets := discoveryTargets(discoveryPort)
+	targets := discoveryTargetsForPorts(normalizedPorts)
 	sendQueries := func() {
 		for _, target := range targets {
 			if _, err := conn.WriteToUDPAddrPort(query, target); err != nil {
@@ -99,6 +116,9 @@ func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name st
 		n, src, err := conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				return nil, nil
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -120,6 +140,21 @@ func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name st
 	}
 
 	return peerInstancesToPeers(instances), nil
+}
+
+func discoveryTargetsForPorts(ports []int) []netip.AddrPort {
+	seen := make(map[netip.AddrPort]struct{})
+	targets := make([]netip.AddrPort, 0, len(ports)*4)
+	for _, port := range ports {
+		for _, target := range discoveryTargets(port) {
+			if _, ok := seen[target]; ok {
+				continue
+			}
+			seen[target] = struct{}{}
+			targets = append(targets, target)
+		}
+	}
+	return targets
 }
 
 func addPeerInstance(instances map[peerInstanceKey]*peerInstance, announce Announce, src netip.Addr, logf func(format string, args ...any), capLogged *bool) {

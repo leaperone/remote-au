@@ -291,6 +291,103 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestListenFirstFallsBackWhenPreferredPortOccupied(t *testing.T) {
+	busy := listenUDPForTest(t, 0)
+	defer func() {
+		_ = busy.Close()
+	}()
+	busyPort := busy.LocalAddr().(*net.UDPAddr).Port
+	fallbackPort := freeUDPPort(t)
+
+	conn, gotPort, err := ListenFirst([]int{busyPort, fallbackPort})
+	if err != nil {
+		t.Fatalf("ListenFirst: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if gotPort != fallbackPort {
+		t.Fatalf("ListenFirst port=%d, want fallback %d", gotPort, fallbackPort)
+	}
+	if conn.LocalAddr().(*net.UDPAddr).Port != fallbackPort {
+		t.Fatalf("conn local port=%d, want %d", conn.LocalAddr().(*net.UDPAddr).Port, fallbackPort)
+	}
+}
+
+func TestListenFirstRejectsInvalidOrEmptyPorts(t *testing.T) {
+	tests := []struct {
+		name  string
+		ports []int
+	}{
+		{name: "nil"},
+		{name: "empty", ports: []int{}},
+		{name: "zero", ports: []int{0}},
+		{name: "negative", ports: []int{-1}},
+		{name: "too high", ports: []int{65536}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, port, err := ListenFirst(tt.ports)
+			if err == nil {
+				_ = conn.Close()
+				t.Fatalf("ListenFirst(%v)=(conn, %d, nil), want error", tt.ports, port)
+			}
+			if conn != nil || port != 0 {
+				t.Fatalf("ListenFirst(%v) returned conn=%v port=%d with error", tt.ports, conn, port)
+			}
+		})
+	}
+}
+
+func TestFindPortsDiscoversMultiplePorts(t *testing.T) {
+	connA := listenUDPForTest(t, 0)
+	connB := listenUDPForTest(t, 0)
+	startResponderLoopForTest(t, connA, Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-a"})
+	startResponderLoopForTest(t, connB, Announce{TCPPort: 47002, InstanceID: testInstanceID(2), Name: "recv-b"})
+
+	ports := []int{
+		connA.LocalAddr().(*net.UDPAddr).Port,
+		connB.LocalAddr().(*net.UDPAddr).Port,
+	}
+	peers, err := FindPorts(context.Background(), ports, 800*time.Millisecond, "sender", nil)
+	if err != nil {
+		t.Fatalf("FindPorts: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("len(peers)=%d, want 2: %+v", len(peers), peers)
+	}
+	got := []string{peers[0].Name, peers[1].Name}
+	want := []string{"recv-a", "recv-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("peer names=%v, want %v", got, want)
+	}
+}
+
+func TestFindPortsDeduplicatesSameInstanceAcrossPorts(t *testing.T) {
+	connA := listenUDPForTest(t, 0)
+	connB := listenUDPForTest(t, 0)
+	announce := Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-host"}
+	startResponderLoopForTest(t, connA, announce)
+	startResponderLoopForTest(t, connB, announce)
+
+	ports := []int{
+		connA.LocalAddr().(*net.UDPAddr).Port,
+		connB.LocalAddr().(*net.UDPAddr).Port,
+	}
+	peers, err := FindPorts(context.Background(), ports, 800*time.Millisecond, "sender", nil)
+	if err != nil {
+		t.Fatalf("FindPorts: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("len(peers)=%d, want 1: %+v", len(peers), peers)
+	}
+	if peers[0].Name != "recv-host" {
+		t.Fatalf("peer name=%q, want recv-host", peers[0].Name)
+	}
+}
+
 func TestResponderLoopReturnsOnFatalSocketError(t *testing.T) {
 	conn := listenUDPForTest(t, 0)
 	announce, err := EncodeAnnounce(Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-host"})
@@ -313,6 +410,32 @@ func TestResponderLoopReturnsOnFatalSocketError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runResponderLoop did not return promptly after fatal socket close")
 	}
+}
+
+func startResponderLoopForTest(t *testing.T, conn *net.UDPConn, announce Announce) {
+	t.Helper()
+	packet, err := EncodeAnnounce(announce)
+	if err != nil {
+		t.Fatalf("EncodeAnnounce: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	limiter := newReplyRateLimiter(time.Now())
+	go func() {
+		done <- runResponderLoop(ctx, conn, packet, &limiter, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = conn.Close()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("runResponderLoop cleanup: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("runResponderLoop did not stop during cleanup")
+		}
+	})
 }
 
 func mustAddr(t *testing.T, raw string) netip.Addr {

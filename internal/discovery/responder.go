@@ -3,9 +3,11 @@ package discovery
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 )
 
@@ -16,9 +18,23 @@ const (
 )
 
 func RunResponder(ctx context.Context, discoveryPort int, audioPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
-	if discoveryPort <= 0 || discoveryPort > 65535 {
-		return fmt.Errorf("discovery port out of range: %d", discoveryPort)
+	conn, _, err := ListenFirst([]int{discoveryPort})
+	if err != nil {
+		return err
 	}
+	return RunResponderOnConn(ctx, conn, audioPort, name, advertisedAddr, logf)
+}
+
+func RunResponderOnConn(ctx context.Context, conn *net.UDPConn, audioPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
+	if conn == nil {
+		return errors.New("discovery responder conn is nil")
+	}
+	// Close the injected conn exactly once: both the ctx watcher and the final
+	// cleanup may reach it, and Go's net.UDPConn double-close would otherwise
+	// return a (harmless but noisy) already-closed error.
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -37,21 +53,15 @@ func RunResponder(ctx context.Context, discoveryPort int, audioPort int, name st
 		return err
 	}
 
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: discoveryPort})
-	if err != nil {
-		return fmt.Errorf("listen discovery udp :%d: %w", discoveryPort, err)
-	}
-
 	runCtx, cancel := context.WithCancel(ctx)
 	watcherDone := make(chan struct{})
 	go func() {
 		defer close(watcherDone)
 		<-runCtx.Done()
-		_ = conn.Close()
+		closeConn()
 	}()
 	defer func() {
 		cancel()
-		_ = conn.Close()
 		<-watcherDone
 	}()
 

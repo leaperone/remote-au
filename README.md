@@ -128,7 +128,7 @@ and plays the result.
 |------|---------|-------------|
 | `--addr` | `:47000` | Audio listen address (TCP + UDP). |
 | `--device` | auto | Playback device index (see `devices`). |
-| `--discovery-port` | `47001` | UDP port the discovery responder listens on. |
+| `--discovery-port` | `0` | UDP discovery port. `0` auto-selects the first available of `47001`, `48001`, `49001`; explicit `N` forces one port. |
 | `--name` | hostname | Name advertised to senders during discovery. |
 | `--no-discovery` | off | Disable the LAN discovery responder. |
 
@@ -143,8 +143,8 @@ Captures audio and streams it to a receiver.
 | `--transport` | `udp` | Audio transport: `udp` (low latency) or `tcp` (reliable). |
 | `--device` | auto | Capture device index (see `devices`). |
 | `--discover-timeout` | `1.5s` | How long to wait for discovery replies. |
-| `--discovery-port` | `47001` | UDP discovery port (must match the receiver). |
-| `--name` | hostname | Name this sender announces. |
+| `--discovery-port` | `0` | UDP discovery port. `0` queries `47001`, `48001`, `49001`; explicit `N` forces one port. |
+| `--name` | hostname | Name this sender uses during discovery. |
 
 ### Global flags
 
@@ -164,11 +164,12 @@ format does not match.
 
 ## How discovery works
 
-- The **receiver** runs a UDP responder. When it receives a discovery query it
-  replies (unicast) with its name, a stable per-run instance ID, and the audio
-  port.
-- The **sender**, when given no `--to`, broadcasts a query and collects replies for
-  `--discover-timeout`:
+- The **receiver** runs a UDP responder. By default it listens on the first
+  available discovery port from `47001`, `48001`, `49001`. When it receives a
+  discovery query, it responds with an announce containing its name, a stable
+  per-run instance ID, and the audio port.
+- The **sender**, when given no `--to`, queries all default discovery ports and
+  collects replies for `--discover-timeout`:
   - **one** receiver found → connects automatically (and prints which one);
   - **several** found → it lists them and asks you to pick with `--to` or `--peer`;
   - **none** found → it tells you to use `--to`.

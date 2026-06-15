@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,6 +97,36 @@ func TestAdvertisedDiscoveryAddr(t *testing.T) {
 				t.Fatalf("advertisedDiscoveryAddr(%v)=%s, want %s", tt.addr, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDiscoveryPortsForFlag(t *testing.T) {
+	got := discoveryPortsForFlag(0)
+	if !reflect.DeepEqual(got, discovery.DefaultPorts) {
+		t.Fatalf("discoveryPortsForFlag(0)=%v, want %v", got, discovery.DefaultPorts)
+	}
+	got[0] = 1
+	if discovery.DefaultPorts[0] == 1 {
+		t.Fatal("discoveryPortsForFlag(0) returned discovery.DefaultPorts backing array")
+	}
+
+	if got := discoveryPortsForFlag(12345); !reflect.DeepEqual(got, []int{12345}) {
+		t.Fatalf("discoveryPortsForFlag(12345)=%v, want [12345]", got)
+	}
+}
+
+func TestDiscoveryPortLabelUsesResolvedPorts(t *testing.T) {
+	got := discoveryPortLabel(discoveryPortsForFlag(0))
+	if strings.Contains(got, ":0") {
+		t.Fatalf("discoveryPortLabel default=%q, must not contain :0", got)
+	}
+	for _, want := range []string{":47001", ":48001", ":49001"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("discoveryPortLabel default=%q, want %s", got, want)
+		}
+	}
+	if got := discoveryPortLabel(discoveryPortsForFlag(12345)); got != ":12345" {
+		t.Fatalf("discoveryPortLabel explicit=%q, want :12345", got)
 	}
 }
 
