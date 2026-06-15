@@ -65,6 +65,7 @@ func OpenCapture(opts CaptureOptions) (*Capture, error) {
 	cfg.Capture.Channels = uint32(format.Channels)
 	if opts.DeviceID != nil {
 		cfg.Capture.DeviceID = opts.DeviceID.Pointer()
+		defer freeDeviceIDPointer(cfg.Capture.DeviceID)
 	}
 	cfg.SampleRate = uint32(format.Rate)
 	cfg.PeriodSizeInFrames = uint32(format.FrameSamples)

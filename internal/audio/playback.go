@@ -9,6 +9,13 @@ import (
 
 type PullFunc func(out []byte, frameCount uint32)
 
+type PlaybackOptions struct {
+	Format   Format
+	DeviceID *malgo.DeviceID
+	Pull     PullFunc
+	Verbose  bool
+}
+
 type Playback struct {
 	ctx       *malgo.AllocatedContext
 	dev       *malgo.Device
@@ -18,16 +25,29 @@ type Playback struct {
 }
 
 func OpenPlayback(format Format, pull PullFunc, verbose bool) (*Playback, error) {
+	return OpenPlaybackWithOptions(PlaybackOptions{
+		Format:  format,
+		Pull:    pull,
+		Verbose: verbose,
+	})
+}
+
+func OpenPlaybackWithOptions(opts PlaybackOptions) (*Playback, error) {
+	format := opts.Format
+	if format == (Format{}) {
+		format = DefaultFormat()
+	}
 	if err := format.Validate(); err != nil {
 		return nil, err
 	}
+	pull := opts.Pull
 	if pull == nil {
 		pull = func(out []byte, _ uint32) {
 			clear(out)
 		}
 	}
 
-	ctx, err := initContext(verbose)
+	ctx, err := initContext(opts.Verbose)
 	if err != nil {
 		return nil, fmt.Errorf("init playback context: %w", err)
 	}
@@ -35,6 +55,10 @@ func OpenPlayback(format Format, pull PullFunc, verbose bool) (*Playback, error)
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
 	cfg.Playback.Format = malgo.FormatS16
 	cfg.Playback.Channels = uint32(format.Channels)
+	if opts.DeviceID != nil {
+		cfg.Playback.DeviceID = opts.DeviceID.Pointer()
+		defer freeDeviceIDPointer(cfg.Playback.DeviceID)
+	}
 	cfg.SampleRate = uint32(format.Rate)
 	cfg.PeriodSizeInFrames = uint32(format.FrameSamples)
 	cfg.PerformanceProfile = malgo.LowLatency

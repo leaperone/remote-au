@@ -46,6 +46,20 @@ func EnumerateDevices(verbose bool) (DeviceLists, error) {
 	}, nil
 }
 
+func PlaybackDeviceByIndex(index int, verbose bool) (*malgo.DeviceID, string, error) {
+	return deviceByIndex(malgo.Playback, index, verbose)
+}
+
+func CaptureDeviceByIndex(index int, source CaptureSource, verbose bool) (*malgo.DeviceID, string, error) {
+	if source == SourceLoopback {
+		if runtime.GOOS != "windows" {
+			return nil, "", fmt.Errorf("loopback device selection is only supported on Windows")
+		}
+		return deviceByIndex(malgo.Playback, index, verbose)
+	}
+	return deviceByIndex(malgo.Capture, index, verbose)
+}
+
 func PrintDevices(w io.Writer, verbose bool) error {
 	devices, err := EnumerateDevices(verbose)
 	if err != nil {
@@ -63,6 +77,35 @@ func PrintDevices(w io.Writer, verbose bool) error {
 	return nil
 }
 
+func deviceByIndex(kind malgo.DeviceType, index int, verbose bool) (*malgo.DeviceID, string, error) {
+	if index < 0 {
+		return nil, "", fmt.Errorf("device index must be non-negative: %d", index)
+	}
+
+	ctx, err := initContext(verbose)
+	if err != nil {
+		return nil, "", fmt.Errorf("init audio context: %w", err)
+	}
+	defer func() {
+		_ = closeContext(ctx)
+	}()
+
+	devices, err := ctx.Devices(kind)
+	if err != nil {
+		return nil, "", fmt.Errorf("enumerate %s devices: %w", deviceKindName(kind), err)
+	}
+	if index >= len(devices) {
+		return nil, "", fmt.Errorf("%s device index %d out of range (found %d)", deviceKindName(kind), index, len(devices))
+	}
+
+	id := devices[index].ID
+	name := devices[index].Name()
+	if name == "" {
+		name = "(unnamed device)"
+	}
+	return &id, name, nil
+}
+
 func mapDeviceInfos(infos []malgo.DeviceInfo, note string) []DeviceInfo {
 	out := make([]DeviceInfo, 0, len(infos))
 	for i := range infos {
@@ -78,6 +121,17 @@ func mapDeviceInfos(infos []malgo.DeviceInfo, note string) []DeviceInfo {
 		})
 	}
 	return out
+}
+
+func deviceKindName(kind malgo.DeviceType) string {
+	switch kind {
+	case malgo.Playback:
+		return "playback"
+	case malgo.Capture:
+		return "capture"
+	default:
+		return "audio"
+	}
 }
 
 func printDeviceList(w io.Writer, devices []DeviceInfo) {
