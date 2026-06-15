@@ -9,7 +9,7 @@ import (
 )
 
 func TestJitterBufferPrimesBeforeEmittingAudio(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 2, 4, 6)
+	buffer := newTestJitterBuffer(t, 1, 4, 6)
 
 	buffer.Write(pcm16(1, 2, 3))
 	out := filledBytes(4, 0x7f)
@@ -38,7 +38,7 @@ func TestJitterBufferPrimesBeforeEmittingAudio(t *testing.T) {
 }
 
 func TestJitterBufferPartialReadReprimesAndFillsSilence(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 2, 4, 6)
+	buffer := newTestJitterBuffer(t, 1, 4, 6)
 	buffer.Write(pcm16(1, 2, 3, 4))
 
 	out := filledBytes(12, 0x7f)
@@ -57,8 +57,12 @@ func TestJitterBufferPartialReadReprimesAndFillsSilence(t *testing.T) {
 	}
 }
 
-func TestJitterBufferReprimesAfterLowWatermark(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 2, 4, 8)
+func TestJitterBufferServesQueuedAudioAndReprimesOnUnderrun(t *testing.T) {
+	// Once primed, the buffer must keep serving whatever is queued even when it
+	// dips below the target watermark. That is normal jitter and must not skip
+	// present audio (the mixer reads each callback in chunks). It
+	// re-primes only on a genuine underrun (a read it cannot fully satisfy).
+	buffer := newTestJitterBuffer(t, 1, 4, 8)
 	buffer.Write(pcm16(1, 2, 3, 4))
 
 	out := filledBytes(6, 0x7f)
@@ -69,29 +73,40 @@ func TestJitterBufferReprimesAfterLowWatermark(t *testing.T) {
 		t.Fatalf("initial read = %v, want [1 2 3]", got)
 	}
 
+	// queue is now 1 frame (below target 4) but still serviceable.
 	out = filledBytes(2, 0x7f)
-	if got := buffer.Read(out, 1); got != 0 {
-		t.Fatalf("below-low Read copied %d frames, want 0", got)
+	if got := buffer.Read(out, 1); got != 1 {
+		t.Fatalf("below-target Read copied %d frames, want 1", got)
 	}
-	if got := pcm16Values(out); !equalInt16(got, []int16{0}) {
-		t.Fatalf("below-low read = %v, want silence", got)
-	}
-	if stats := buffer.Stats(); stats.UnderrunCount != 1 || stats.QueueSize != 1 {
-		t.Fatalf("stats after low watermark = underrun %d queue %d, want 1 and 1", stats.UnderrunCount, stats.QueueSize)
+	if got := pcm16Values(out); !equalInt16(got, []int16{4}) {
+		t.Fatalf("below-target read = %v, want [4] (data still present)", got)
 	}
 
-	buffer.Write(pcm16(5, 6, 7))
+	// queue is now empty: the next read is a genuine underrun -> silence + re-prime.
+	out = filledBytes(2, 0x7f)
+	if got := buffer.Read(out, 1); got != 0 {
+		t.Fatalf("underrun Read copied %d frames, want 0", got)
+	}
+	if got := pcm16Values(out); !equalInt16(got, []int16{0}) {
+		t.Fatalf("underrun read = %v, want silence", got)
+	}
+	if stats := buffer.Stats(); stats.UnderrunCount != 1 || stats.QueueSize != 0 {
+		t.Fatalf("stats after underrun = underrun %d queue %d, want 1 and 0", stats.UnderrunCount, stats.QueueSize)
+	}
+
+	// must re-accumulate to target before serving again.
+	buffer.Write(pcm16(5, 6, 7, 8))
 	out = filledBytes(8, 0x7f)
 	if got := buffer.Read(out, 4); got != 4 {
 		t.Fatalf("re-primed Read copied %d frames, want 4", got)
 	}
-	if got := pcm16Values(out); !equalInt16(got, []int16{4, 5, 6, 7}) {
+	if got := pcm16Values(out); !equalInt16(got, []int16{5, 6, 7, 8}) {
 		t.Fatalf("re-primed read = %v, want queued audio", got)
 	}
 }
 
 func TestJitterBufferDropsOldestFramesAboveHighWatermark(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 2, 2, 4)
+	buffer := newTestJitterBuffer(t, 1, 2, 4)
 	buffer.Write(pcm16(1, 2, 3, 4))
 	buffer.Write(pcm16(5, 6))
 
@@ -113,7 +128,7 @@ func TestJitterBufferDropsOldestFramesAboveHighWatermark(t *testing.T) {
 }
 
 func TestJitterBufferReadDoesNotBlockWhenLocked(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 1, 2, 4)
+	buffer := newTestJitterBuffer(t, 1, 2, 4)
 	buffer.Write(pcm16(1, 2))
 
 	buffer.mu.Lock()
@@ -133,7 +148,7 @@ func TestJitterBufferReadDoesNotBlockWhenLocked(t *testing.T) {
 }
 
 func TestJitterBufferStatsDoesNotNeedDataLock(t *testing.T) {
-	buffer := newTestJitterBuffer(t, 1, 1, 2, 4)
+	buffer := newTestJitterBuffer(t, 1, 2, 4)
 	buffer.Write(pcm16(1, 2))
 
 	done := make(chan struct{})
@@ -152,7 +167,7 @@ func TestJitterBufferStatsDoesNotNeedDataLock(t *testing.T) {
 	}
 }
 
-func newTestJitterBuffer(t *testing.T, channels, low, target, high int) *JitterBuffer {
+func newTestJitterBuffer(t *testing.T, channels, target, high int) *JitterBuffer {
 	t.Helper()
 	buffer, err := NewJitterBuffer(JitterBufferOptions{
 		Format: audio.Format{
@@ -160,7 +175,6 @@ func newTestJitterBuffer(t *testing.T, channels, low, target, high int) *JitterB
 			Channels:     channels,
 			FrameSamples: 1,
 		},
-		LowWatermarkFrames:  low,
 		TargetFrames:        target,
 		HighWatermarkFrames: high,
 	})

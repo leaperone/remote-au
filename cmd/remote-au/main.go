@@ -155,7 +155,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	discoveryPort := 47001
 	name := defaultHostname()
 	noDiscovery := false
-	fs.StringVar(&addr, "addr", addr, "TCP listen address")
+	fs.StringVar(&addr, "addr", addr, "audio listen address")
 	fs.IntVar(&deviceIndex, "device", deviceIndex, "playback device index from devices")
 	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
 	fs.StringVar(&name, "name", name, "discovery name")
@@ -190,6 +190,13 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	if !ok {
 		return fmt.Errorf("unexpected TCP listener address type %T", ln.Addr())
 	}
+	udpConn, err := net.ListenUDP("udp", udpListenAddrFromTCP(tcpAddr))
+	if err != nil {
+		return fmt.Errorf("listen udp %s: %w", udpListenAddrFromTCP(tcpAddr), err)
+	}
+	defer func() {
+		_ = udpConn.Close()
+	}()
 
 	playbackOpts := audio.PlaybackOptions{
 		Format:  format,
@@ -227,7 +234,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	if noDiscovery {
 		fmt.Fprintln(stdout, "discovery disabled")
 	} else if isLoopbackOnlyTCPAddr(tcpAddr) {
-		fmt.Fprintf(stdout, "discovery disabled: TCP listener is loopback-only (%s), so LAN discovery will not advertise it\n", tcpAddr)
+		fmt.Fprintf(stdout, "discovery disabled: audio listener is loopback-only (%s), so LAN discovery will not advertise it\n", tcpAddr)
 	} else {
 		advertisedAddr := advertisedDiscoveryAddr(tcpAddr)
 		fmt.Fprintf(stdout, "listening for discovery on UDP :%d as %q\n", discoveryPort, name)
@@ -239,7 +246,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		}()
 	}
 
-	if err := receiver.RunListener(ctx, ln); err != nil {
+	if err := receiver.RunListeners(ctx, ln, udpConn); err != nil {
 		return err
 	}
 	select {
@@ -260,13 +267,15 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	discoveryPort := 47001
 	name := defaultHostname()
 	sourceName := "mic"
+	transportName := string(transport.TransportUDP)
 	deviceIndex := -1
-	fs.StringVar(&to, "to", to, "receiver TCP address, for example 127.0.0.1:47000; skips LAN discovery")
+	fs.StringVar(&to, "to", to, "receiver audio address, for example 127.0.0.1:47000; skips LAN discovery")
 	fs.StringVar(&peerName, "peer", peerName, "discovered receiver name to require; discovery trusts the LAN, so use --to or --peer on untrusted networks")
 	fs.DurationVar(&discoverTimeout, "discover-timeout", discoverTimeout, "UDP discovery timeout")
 	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
 	fs.StringVar(&name, "name", name, "sender name")
 	fs.StringVar(&sourceName, "source", sourceName, "capture source: mic or loopback")
+	fs.StringVar(&transportName, "transport", transportName, "audio transport: udp or tcp")
 	fs.IntVar(&deviceIndex, "device", deviceIndex, "capture device index from devices; loopback uses playback device index on Windows")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -276,6 +285,10 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	}
 
 	source, err := parseCaptureSource(sourceName)
+	if err != nil {
+		return err
+	}
+	senderTransport, err := parseSenderTransport(transportName)
 	if err != nil {
 		return err
 	}
@@ -324,14 +337,15 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		return err
 	}
 
-	fmt.Fprintf(stdout, "send using %s, source=%s\n", format, sourceName)
+	fmt.Fprintf(stdout, "send using %s, source=%s, transport=%s\n", format, sourceName, senderTransport)
 	fmt.Fprintln(stdout, "Press Ctrl-C to stop.")
 
 	if err := transport.RunSender(ctx, transport.SenderOptions{
-		Address: to,
-		Capture: capture,
-		Name:    name,
-		Logf:    writerLogf(stdout),
+		Address:   to,
+		Capture:   capture,
+		Name:      name,
+		Transport: senderTransport,
+		Logf:      writerLogf(stdout),
 	}); err != nil {
 		return err
 	}
@@ -350,12 +364,30 @@ func parseCaptureSource(name string) (audio.CaptureSource, error) {
 	}
 }
 
+func parseSenderTransport(name string) (transport.SenderTransport, error) {
+	switch strings.ToLower(name) {
+	case "", string(transport.TransportUDP):
+		return transport.TransportUDP, nil
+	case string(transport.TransportTCP):
+		return transport.TransportTCP, nil
+	default:
+		return "", fmt.Errorf("unknown transport %q (want udp or tcp)", name)
+	}
+}
+
 func defaultHostname() string {
 	name, err := os.Hostname()
 	if err != nil || name == "" {
 		return "remote-au"
 	}
 	return name
+}
+
+func udpListenAddrFromTCP(addr *net.TCPAddr) *net.UDPAddr {
+	if addr == nil {
+		return &net.UDPAddr{}
+	}
+	return &net.UDPAddr{IP: addr.IP, Port: addr.Port, Zone: addr.Zone}
 }
 
 func isLoopbackOnlyTCPAddr(addr *net.TCPAddr) bool {

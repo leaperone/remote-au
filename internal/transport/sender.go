@@ -3,8 +3,10 @@ package transport
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"remote-au/internal/audio"
@@ -14,6 +16,7 @@ import (
 const (
 	defaultWriteTimeout = 2 * time.Second
 	capturePollInterval = 2 * time.Millisecond
+	helloInterval       = time.Second
 )
 
 type Capture interface {
@@ -21,10 +24,18 @@ type Capture interface {
 	Read(dst []byte) int
 }
 
+type SenderTransport string
+
+const (
+	TransportUDP SenderTransport = "udp"
+	TransportTCP SenderTransport = "tcp"
+)
+
 type SenderOptions struct {
 	Address      string
 	Capture      Capture
 	Name         string
+	Transport    SenderTransport
 	WriteTimeout time.Duration
 	Logf         func(format string, args ...any)
 }
@@ -39,6 +50,9 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 	if opts.Name == "" {
 		opts.Name = "remote-au"
 	}
+	if opts.Transport == "" {
+		opts.Transport = TransportUDP
+	}
 	if opts.WriteTimeout <= 0 {
 		opts.WriteTimeout = defaultWriteTimeout
 	}
@@ -51,6 +65,17 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 		return err
 	}
 
+	switch opts.Transport {
+	case TransportUDP:
+		return runUDPSender(ctx, opts, hs)
+	case TransportTCP:
+		return runTCPSender(ctx, opts, hs)
+	default:
+		return fmt.Errorf("unsupported sender transport %q (want udp or tcp)", opts.Transport)
+	}
+}
+
+func runTCPSender(ctx context.Context, opts SenderOptions, hs protocol.Handshake) error {
 	var seq uint64
 	var captureFrame uint64
 	dialer := net.Dialer{Timeout: opts.WriteTimeout}
@@ -73,6 +98,145 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	return err
+}
+
+func runUDPSender(ctx context.Context, opts SenderOptions, hs protocol.Handshake) error {
+	dialer := net.Dialer{Timeout: opts.WriteTimeout}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+
+	opts.Logf("connecting to %s over udp", opts.Address)
+	conn, err := dialer.DialContext(ctx, "udp", opts.Address)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	defer conn.Close()
+	opts.Logf("connected to %s over udp", conn.RemoteAddr())
+
+	if err := writeUDPHello(conn, hs, opts.WriteTimeout); err != nil {
+		cont, err := handleUDPWriteError(ctx, opts, "udp hello", err)
+		if !cont {
+			return err
+		}
+	}
+	helloTicker := time.NewTicker(helloInterval)
+	defer helloTicker.Stop()
+
+	bytesPerFrame := opts.Capture.Format().BytesPerFrame()
+	if bytesPerFrame <= 0 {
+		return fmt.Errorf("invalid capture format: %d bytes per frame", bytesPerFrame)
+	}
+	chunkFrames := max(1, protocol.MaxUDPAudioPayloadBytes/bytesPerFrame)
+	chunkBytes := chunkFrames * bytesPerFrame
+	packet := make([]byte, chunkBytes)
+	filled := 0
+	var seq uint64
+	var captureFrame uint64
+	packetCaptureFrame := captureFrame
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-helloTicker.C:
+			if err := writeUDPHello(conn, hs, opts.WriteTimeout); err != nil {
+				cont, err := handleUDPWriteError(ctx, opts, "udp hello", err)
+				if !cont {
+					return err
+				}
+			}
+		default:
+		}
+
+		if filled == 0 {
+			packetCaptureFrame = captureFrame
+		}
+		n := opts.Capture.Read(packet[filled:])
+		if n > 0 {
+			filled += n
+			captureFrame += uint64(n / bytesPerFrame)
+			if filled < len(packet) {
+				continue
+			}
+
+			frame := protocol.Frame{
+				Seq:          seq,
+				CaptureFrame: packetCaptureFrame,
+				Payload:      packet,
+			}
+			seq++
+			if err := writeUDPAudio(conn, frame, opts.WriteTimeout); err != nil {
+				cont, err := handleUDPWriteError(ctx, opts, "udp audio", err)
+				if !cont {
+					return err
+				}
+			}
+			filled = 0
+			continue
+		}
+
+		if !sleepContext(ctx, capturePollInterval) {
+			return nil
+		}
+	}
+}
+
+func handleUDPWriteError(ctx context.Context, opts SenderOptions, what string, err error) (bool, error) {
+	if ctx.Err() != nil {
+		return false, nil
+	}
+	if !isTransientUDPWriteError(err) {
+		return false, err
+	}
+	opts.Logf("%s write failed transiently: %v", what, err)
+	return true, nil
+}
+
+func isTransientUDPWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ENETDOWN) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.EAGAIN)
+}
+
+func writeUDPHello(conn net.Conn, hs protocol.Handshake, timeout time.Duration) error {
+	packet, err := protocol.AppendUDPHello(nil, hs)
+	if err != nil {
+		return err
+	}
+	if err := setWriteDeadline(conn, timeout); err != nil {
+		return err
+	}
+	_, err = conn.Write(packet)
+	return err
+}
+
+func writeUDPAudio(conn net.Conn, frame protocol.Frame, timeout time.Duration) error {
+	packet, err := protocol.AppendUDPAudio(nil, frame)
+	if err != nil {
+		return err
+	}
+	if err := setWriteDeadline(conn, timeout); err != nil {
+		return err
+	}
+	_, err = conn.Write(packet)
 	return err
 }
 

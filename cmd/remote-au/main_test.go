@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"remote-au/internal/discovery"
+	"remote-au/internal/transport"
 )
 
 func TestChooseDiscoveredPeerRequiresPeerNameForSingleInstance(t *testing.T) {
@@ -95,5 +96,36 @@ func TestAdvertisedDiscoveryAddr(t *testing.T) {
 				t.Fatalf("advertisedDiscoveryAddr(%v)=%s, want %s", tt.addr, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseSenderTransport(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want transport.SenderTransport
+	}{
+		{name: "default", want: transport.TransportUDP},
+		{name: "udp", in: "udp", want: transport.TransportUDP},
+		{name: "tcp", in: "tcp", want: transport.TransportTCP},
+		{name: "case insensitive", in: "TCP", want: transport.TransportTCP},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseSenderTransport(tt.in)
+			if err != nil {
+				t.Fatalf("parseSenderTransport(%q): %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseSenderTransport(%q)=%q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSenderTransportRejectsUnknown(t *testing.T) {
+	if _, err := parseSenderTransport("quic"); err == nil || !strings.Contains(err.Error(), "udp or tcp") {
+		t.Fatalf("parseSenderTransport unknown err = %v, want udp/tcp error", err)
 	}
 }

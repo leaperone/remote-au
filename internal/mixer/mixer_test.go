@@ -91,7 +91,6 @@ func newTestMixerWithScratch(t *testing.T, scratchFrames int) *Mixer {
 			FrameSamples: 1,
 		},
 		Jitter: JitterBufferOptions{
-			LowWatermarkFrames:  1,
 			TargetFrames:        1,
 			HighWatermarkFrames: 8,
 		},

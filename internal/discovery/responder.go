@@ -15,7 +15,7 @@ const (
 	announceReplyBurst    = 16
 )
 
-func RunResponder(ctx context.Context, discoveryPort int, tcpPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
+func RunResponder(ctx context.Context, discoveryPort int, audioPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
 	if discoveryPort <= 0 || discoveryPort > 65535 {
 		return fmt.Errorf("discovery port out of range: %d", discoveryPort)
 	}
@@ -28,7 +28,7 @@ func RunResponder(ctx context.Context, discoveryPort int, tcpPort int, name stri
 		return err
 	}
 	announce, err := EncodeAnnounce(Announce{
-		TCPPort:        tcpPort,
+		TCPPort:        audioPort,
 		InstanceID:     instanceID,
 		AdvertisedAddr: advertisedAddr,
 		Name:           name,
@@ -55,7 +55,7 @@ func RunResponder(ctx context.Context, discoveryPort int, tcpPort int, name stri
 		<-watcherDone
 	}()
 
-	logf("discovery listening on %s, replying with TCP port %d as %q", conn.LocalAddr(), tcpPort, name)
+	logf("discovery listening on %s, replying with audio port %d as %q", conn.LocalAddr(), audioPort, name)
 
 	limiter := newReplyRateLimiter(time.Now())
 	return runResponderLoop(runCtx, conn, announce, &limiter, logf)

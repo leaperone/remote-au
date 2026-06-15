@@ -11,14 +11,12 @@ import (
 )
 
 const (
-	defaultLowWatermarkMillis  = 50
 	defaultTargetMillis        = 60
 	defaultHighWatermarkMillis = 80
 )
 
 type JitterBufferOptions struct {
 	Format              audio.Format
-	LowWatermarkFrames  int
 	TargetFrames        int
 	HighWatermarkFrames int
 }
@@ -33,7 +31,6 @@ type JitterBuffer struct {
 	read int
 	used int
 
-	lowFrames    int
 	targetFrames int
 	highFrames   int
 	primed       bool
@@ -52,10 +49,6 @@ func NewJitterBuffer(opts JitterBufferOptions) (*JitterBuffer, error) {
 		return nil, err
 	}
 
-	lowFrames := opts.LowWatermarkFrames
-	if lowFrames <= 0 {
-		lowFrames = millisToFrames(format.Rate, defaultLowWatermarkMillis)
-	}
 	targetFrames := opts.TargetFrames
 	if targetFrames <= 0 {
 		targetFrames = millisToFrames(format.Rate, defaultTargetMillis)
@@ -64,11 +57,8 @@ func NewJitterBuffer(opts JitterBufferOptions) (*JitterBuffer, error) {
 	if highFrames <= 0 {
 		highFrames = millisToFrames(format.Rate, defaultHighWatermarkMillis)
 	}
-	if lowFrames <= 0 || targetFrames <= 0 || highFrames <= 0 {
+	if targetFrames <= 0 || highFrames <= 0 {
 		return nil, fmt.Errorf("jitter buffer watermarks must be positive")
-	}
-	if lowFrames > targetFrames {
-		return nil, fmt.Errorf("low watermark %d exceeds target %d", lowFrames, targetFrames)
 	}
 	if targetFrames > highFrames {
 		return nil, fmt.Errorf("target watermark %d exceeds high watermark %d", targetFrames, highFrames)
@@ -79,7 +69,6 @@ func NewJitterBuffer(opts JitterBufferOptions) (*JitterBuffer, error) {
 		format:        format,
 		bytesPerFrame: bytesPerFrame,
 		buf:           make([]byte, highFrames*bytesPerFrame),
-		lowFrames:     lowFrames,
 		targetFrames:  targetFrames,
 		highFrames:    highFrames,
 	}, nil
@@ -144,7 +133,10 @@ func (b *JitterBuffer) Read(dst []byte, frameCount int) int {
 		b.primed = true
 	}
 
-	if queuedFrames < b.lowFrames || queuedFrames < frames {
+	// Re-prime only on a genuine underrun: the queue cannot satisfy this read.
+	// A transient mid-callback drain can still contain present audio and should
+	// be served rather than skipped.
+	if queuedFrames < frames {
 		b.primed = false
 		b.underrunFrames.Add(uint64(frames))
 		clear(dst[:wantBytes])
@@ -169,14 +161,6 @@ func (b *JitterBuffer) Stats() stats.AudioStats {
 
 func (b *JitterBuffer) QueueSizeFrames() int {
 	return int(b.queueFrames.Load())
-}
-
-func (b *JitterBuffer) LowWatermarkFrames() int {
-	return b.lowFrames
-}
-
-func (b *JitterBuffer) LowWatermarkBytes() int {
-	return b.lowFrames * b.bytesPerFrame
 }
 
 func (b *JitterBuffer) TargetFrames() int {
