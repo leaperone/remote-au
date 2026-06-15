@@ -7,23 +7,17 @@
     "rau": "bin/remote-au"
   },
   "files": [
-    "bin/remote-au"
+    "bin/remote-au",
+    "scripts/postinstall.mjs"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "test": "node --test"
-  },
-  "optionalDependencies": {
-    "@leaperone/remote-au-darwin-arm64": "0.0.0",
-    "@leaperone/remote-au-darwin-x64": "0.0.0",
-    "@leaperone/remote-au-linux-x64": "0.0.0",
-    "@leaperone/remote-au-linux-arm64": "0.0.0",
-    "@leaperone/remote-au-win32-x64": "0.0.0"
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   },
   "repository": {
     "type": "git",

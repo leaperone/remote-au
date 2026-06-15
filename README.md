@@ -60,9 +60,10 @@ The CLI is available under two command names — the full `remote-au` and the sh
 `rau` — they are identical.
 
 Supported targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
-`win32-x64`. The `@leaperone/remote-au` package is a thin launcher; npm installs the
-matching `@leaperone/remote-au-<platform>-<arch>` binary package via optional
-dependencies.
+`win32-x64`. The `@leaperone/remote-au` package is a thin launcher; its install
+script downloads the matching prebuilt binary from the GitHub Release. This needs
+network access at install time and does **not** work with `--ignore-scripts`. If you
+prefer no install scripts, build from source instead (below).
 
 ### Build from source
 
@@ -246,10 +247,15 @@ allocation-free in steady state.
 
 ## Releasing (maintainers)
 
-Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+and published to npm via **Trusted Publishing (OIDC)** — no npm token or secret.
 
-One-time setup: add an npm **automation token** as the repository secret
-`NPM_TOKEN` (npm → Access Tokens → Generate → Automation).
+One-time setup on npmjs.com → `@leaperone/remote-au` → Settings → **Trusted Publisher**,
+add a GitHub Actions publisher:
+
+- **Organization/owner:** `leaperone`
+- **Repository:** `remote-au`
+- **Workflow filename:** `release.yml`
 
 Then cut a release by pushing a semver tag:
 
@@ -258,9 +264,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-CI builds the cgo binary on each platform's native runner, assembles the
-per-platform npm packages (`remote-au-<platform>-<arch>`), publishes them and the
-main `remote-au` package to npm, and attaches the raw binaries to a GitHub Release.
+CI builds the cgo binary on each platform's native runner, attaches them to a
+GitHub Release, and publishes `@leaperone/remote-au` to npm via OIDC (with build
+provenance). The package's install script then downloads the matching binary from
+that Release.
 
 ## License
 
