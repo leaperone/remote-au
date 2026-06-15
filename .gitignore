@@ -1,0 +1,4 @@
+.plans/
+/remote-au
+*.o
+*.a
