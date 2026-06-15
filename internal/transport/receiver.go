@@ -10,33 +10,39 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/mixer"
 	"remote-au/internal/protocol"
+	"remote-au/internal/stats"
 )
 
 const (
 	defaultReadTimeout      = 5 * time.Second
 	defaultHandshakeTimeout = 2 * time.Second
-	defaultBufferMillis     = 80
 	maxPendingHandshakes    = 16
+	defaultMaxStreams       = 8
 )
 
 type ReceiverOptions struct {
 	Format       audio.Format
 	BufferFrames int
 	ReadTimeout  time.Duration
+	MaxStreams   int
 	Logf         func(format string, args ...any)
 }
 
 type Receiver struct {
 	format           audio.Format
-	buffer           *pcmBuffer
+	mixer            *mixer.Mixer
+	maxStreams       int
 	readTimeout      time.Duration
 	handshakeTimeout time.Duration
 	logf             func(format string, args ...any)
 	gaps             atomic.Uint64
+	nextStreamID     atomic.Uint64
 
-	activeMu   sync.Mutex
-	activeConn net.Conn
+	activeMu      sync.Mutex
+	activeStreams map[net.Conn]string
+	conns         map[net.Conn]struct{}
 }
 
 func NewReceiver(opts ReceiverOptions) (*Receiver, error) {
@@ -46,23 +52,33 @@ func NewReceiver(opts ReceiverOptions) (*Receiver, error) {
 	if err := opts.Format.Validate(); err != nil {
 		return nil, err
 	}
-	if opts.BufferFrames <= 0 {
-		opts.BufferFrames = defaultReceiverBufferFrames(opts.Format)
-	}
 	if opts.ReadTimeout <= 0 {
 		opts.ReadTimeout = defaultReadTimeout
+	}
+	if opts.MaxStreams <= 0 {
+		opts.MaxStreams = defaultMaxStreams
 	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
 
-	bytesPerFrame := opts.Format.BytesPerFrame()
+	mix, err := mixer.New(mixer.Options{
+		Format: opts.Format,
+		Jitter: receiverJitterOptions(opts.Format, opts.BufferFrames),
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &Receiver{
 		format:           opts.Format,
-		buffer:           newPCMBuffer(opts.BufferFrames*bytesPerFrame, bytesPerFrame),
+		mixer:            mix,
+		maxStreams:       opts.MaxStreams,
 		readTimeout:      opts.ReadTimeout,
 		handshakeTimeout: defaultHandshakeTimeout,
 		logf:             opts.Logf,
+		activeStreams:    make(map[net.Conn]string),
+		conns:            make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -82,9 +98,15 @@ func (r *Receiver) Run(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	defer ln.Close()
 
 	r.logf("listening on %s", ln.Addr())
+	var handlers sync.WaitGroup
+	defer func() {
+		cancel()
+		_ = ln.Close()
+		r.closeActive()
+		handlers.Wait()
+	}()
 	go func() {
 		<-runCtx.Done()
 		_ = ln.Close()
@@ -95,54 +117,48 @@ func (r *Receiver) Run(ctx context.Context, addr string) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if runCtx.Err() != nil || ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
+		r.trackConn(conn)
 
 		select {
 		case pendingHandshakes <- struct{}{}:
 		default:
 			r.logf("too many pending handshakes, rejecting %s", conn.RemoteAddr())
+			r.untrackConn(conn)
 			_ = conn.Close()
 			continue
 		}
 
-		go r.handleConnection(runCtx, conn, func() {
-			<-pendingHandshakes
-		})
+		handlers.Add(1)
+		go func(conn net.Conn) {
+			defer handlers.Done()
+			r.handleConnection(runCtx, conn, func() {
+				<-pendingHandshakes
+			})
+		}(conn)
 	}
 }
 
 func (r *Receiver) Pull(out []byte, frameCount uint32) {
-	bytesPerFrame := r.format.BytesPerFrame()
-	want := int(frameCount) * bytesPerFrame
-	if want > len(out) {
-		want = len(out) - len(out)%bytesPerFrame
-	}
-	if want <= 0 {
-		clear(out)
-		return
-	}
-
-	clear(out[:want])
-	n := r.buffer.TryRead(out[:want])
-	if n < want {
-		clear(out[n:want])
-	}
-	if want < len(out) {
-		clear(out[want:])
-	}
+	r.mixer.Read(out, frameCount)
 }
 
 func (r *Receiver) GapCount() uint64 {
 	return r.gaps.Load()
 }
 
+func (r *Receiver) Stats() stats.AggregateSnapshot {
+	return r.mixer.Snapshot()
+}
+
 func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releasePending func()) {
 	remote := fmt.Sprint(conn.RemoteAddr())
 	active := false
+	var stream *mixer.Stream
 	pending := true
 	releasePendingOnce := func() {
 		if pending {
@@ -153,8 +169,9 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 	defer func() {
 		releasePendingOnce()
 		if active {
-			r.clearActive(conn)
+			r.unregisterStream(conn, stream.ID())
 		}
+		r.untrackConn(conn)
 		_ = conn.Close()
 		if active {
 			r.logf("connection from %s closed", remote)
@@ -176,15 +193,17 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 		r.logf("rejecting %s: %v", remote, err)
 		return
 	}
-	if !r.setActive(conn) {
-		r.logf("rejecting %s: another stream is active", remote)
+	var ok bool
+	stream, ok = r.registerStream(conn, hs.Name, remote)
+	if !ok {
+		r.logf("rejecting %s: maximum active streams reached (%d)", remote, r.maxStreams)
 		return
 	}
 	active = true
 	releasePendingOnce()
 
-	r.buffer.Reset()
 	name := hs.Name
+	name = stats.SafeDisplayName(name)
 	if name == "" {
 		name = "(unnamed)"
 	}
@@ -212,7 +231,7 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 		if !r.acceptFrame(remote, hs, frame, &seenFrame, &expectedSeq, &expectedCaptureFrame) {
 			continue
 		}
-		r.buffer.Write(frame.Payload)
+		stream.Write(frame.Payload)
 	}
 }
 
@@ -261,39 +280,73 @@ func (r *Receiver) validateHandshake(hs protocol.Handshake) error {
 	return nil
 }
 
-func defaultReceiverBufferFrames(format audio.Format) int {
-	frames := format.Rate * defaultBufferMillis / 1000
-	if frames < format.FrameSamples {
-		frames = format.FrameSamples
-	}
-	return frames
-}
-
-func (r *Receiver) setActive(conn net.Conn) bool {
+func (r *Receiver) registerStream(conn net.Conn, name, remote string) (*mixer.Stream, bool) {
 	r.activeMu.Lock()
 	defer r.activeMu.Unlock()
-	if r.activeConn != nil {
-		return false
+	if len(r.activeStreams) >= r.maxStreams {
+		return nil, false
 	}
-	r.activeConn = conn
-	return true
+	id := fmt.Sprintf("%s#%d", remote, r.nextStreamID.Add(1))
+	stream, err := r.mixer.AddStream(id, name, remote)
+	if err != nil {
+		r.logf("register stream failed from %s: %v", remote, err)
+		return nil, false
+	}
+	r.activeStreams[conn] = id
+	return stream, true
 }
 
-func (r *Receiver) clearActive(conn net.Conn) {
+func (r *Receiver) unregisterStream(conn net.Conn, id string) {
 	r.activeMu.Lock()
 	defer r.activeMu.Unlock()
-	if r.activeConn == conn {
-		r.activeConn = nil
+	if r.activeStreams[conn] == id {
+		delete(r.activeStreams, conn)
+		r.mixer.RemoveStream(id)
 	}
 }
 
 func (r *Receiver) closeActive() {
 	r.activeMu.Lock()
-	defer r.activeMu.Unlock()
-	if r.activeConn != nil {
-		_ = r.activeConn.Close()
-		r.activeConn = nil
+	conns := make([]net.Conn, 0, len(r.conns))
+	for conn := range r.conns {
+		conns = append(conns, conn)
 	}
+	r.activeMu.Unlock()
+
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+func (r *Receiver) trackConn(conn net.Conn) {
+	r.activeMu.Lock()
+	r.conns[conn] = struct{}{}
+	r.activeMu.Unlock()
+}
+
+func (r *Receiver) untrackConn(conn net.Conn) {
+	r.activeMu.Lock()
+	delete(r.conns, conn)
+	r.activeMu.Unlock()
+}
+
+func receiverJitterOptions(format audio.Format, targetFrames int) mixer.JitterBufferOptions {
+	opts := mixer.JitterBufferOptions{Format: format}
+	if targetFrames <= 0 {
+		return opts
+	}
+	opts.TargetFrames = targetFrames
+	opts.LowWatermarkFrames = min(targetFrames, framesForMillis(format.Rate, 50))
+	opts.HighWatermarkFrames = max(targetFrames, framesForMillis(format.Rate, 80))
+	return opts
+}
+
+func framesForMillis(rate, millis int) int {
+	frames := rate * millis / 1000
+	if frames < 1 {
+		return 1
+	}
+	return frames
 }
 
 func setReadDeadline(conn net.Conn, timeout time.Duration) error {

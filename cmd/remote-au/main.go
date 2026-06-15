@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/stats"
 	"remote-au/internal/transport"
 )
 
@@ -76,7 +77,7 @@ func registerGlobalFlags(fs *flag.FlagSet, opts *globalOptions) {
 	fs.IntVar(&opts.rate, "rate", opts.rate, "sample rate in Hz")
 	fs.IntVar(&opts.channels, "channels", opts.channels, "channel count")
 	fs.IntVar(&opts.frameMS, "frame-ms", opts.frameMS, "PCM packet duration in milliseconds")
-	fs.BoolVar(&opts.verbose, "verbose", opts.verbose, "enable verbose audio backend logging")
+	fs.BoolVar(&opts.verbose, "verbose", opts.verbose, "enable verbose audio backend and stats logging")
 }
 
 func printUsage(w io.Writer, fs *flag.FlagSet) {
@@ -195,6 +196,10 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if verbose {
+		go printReceiverStats(ctx, stdout, receiver, 2*time.Second)
+	}
+
 	if err := receiver.Run(ctx, addr); err != nil {
 		return err
 	}
@@ -289,5 +294,18 @@ func parseCaptureSource(name string) (audio.CaptureSource, error) {
 func writerLogf(w io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		fmt.Fprintf(w, format+"\n", args...)
+	}
+}
+
+func printReceiverStats(ctx context.Context, w io.Writer, receiver *transport.Receiver, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fmt.Fprint(w, stats.FormatVerbose(receiver.Stats()))
+		}
 	}
 }
