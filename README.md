@@ -51,13 +51,18 @@ audio out of one machine's speakers**, not to expose it as a virtual mic.
 From npm (prebuilt binary for your platform is fetched automatically):
 
 ```sh
-npm install -g remote-au
-remote-au --help
+npm install -g @leaperone/remote-au
+remote-au --help        # or the short alias:
+rau --help
 ```
 
+The CLI is available under two command names — the full `remote-au` and the short
+`rau` — they are identical.
+
 Supported targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
-`win32-x64`. The `remote-au` package is a thin launcher; npm installs the matching
-`remote-au-<platform>-<arch>` binary package via optional dependencies.
+`win32-x64`. The `@leaperone/remote-au` package is a thin launcher; npm installs the
+matching `@leaperone/remote-au-<platform>-<arch>` binary package via optional
+dependencies.
 
 ### Build from source
 

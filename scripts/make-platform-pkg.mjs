@@ -30,8 +30,11 @@ for (const [k, v] of Object.entries({ platform, arch, binary, version })) {
 }
 
 const exe = platform === 'win32' ? 'remote-au.exe' : 'remote-au';
-const pkgName = `remote-au-${platform}-${arch}`;
-const pkgDir = join(outdir, pkgName);
+const pkgName = `@leaperone/remote-au-${platform}-${arch}`;
+// Keep the on-disk directory flat (no scope slash); npm publish uses the
+// package.json "name", not the directory name.
+const dirName = `remote-au-${platform}-${arch}`;
+const pkgDir = join(outdir, dirName);
 const binDir = join(pkgDir, 'bin');
 mkdirSync(binDir, { recursive: true });
 
@@ -46,6 +49,7 @@ const pkg = {
   os: [platform],
   cpu: [arch],
   files: [`bin/${exe}`],
+  publishConfig: { access: 'public' },
   license: 'MIT',
   repository: { type: 'git', url: 'git+https://github.com/leaperone/remote-au.git' },
 };

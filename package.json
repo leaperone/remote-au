@@ -1,22 +1,26 @@
 {
-  "name": "remote-au",
+  "name": "@leaperone/remote-au",
   "version": "0.0.0",
   "description": "N→1 LAN audio aggregation CLI — multiple senders capture audio, one receiver mixes and plays it back. Go + miniaudio, UDP (default) / TCP, auto-discovery.",
   "bin": {
-    "remote-au": "bin/remote-au"
+    "remote-au": "bin/remote-au",
+    "rau": "bin/remote-au"
   },
   "files": [
     "bin/remote-au"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node --test"
   },
   "optionalDependencies": {
-    "remote-au-darwin-arm64": "0.0.0",
-    "remote-au-darwin-x64": "0.0.0",
-    "remote-au-linux-x64": "0.0.0",
-    "remote-au-linux-arm64": "0.0.0",
-    "remote-au-win32-x64": "0.0.0"
+    "@leaperone/remote-au-darwin-arm64": "0.0.0",
+    "@leaperone/remote-au-darwin-x64": "0.0.0",
+    "@leaperone/remote-au-linux-x64": "0.0.0",
+    "@leaperone/remote-au-linux-arm64": "0.0.0",
+    "@leaperone/remote-au-win32-x64": "0.0.0"
   },
   "engines": {
     "node": ">=16"
