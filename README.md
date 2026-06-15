@@ -46,7 +46,22 @@ audio out of one machine's speakers**, not to expose it as a virtual mic.
 - **Bounded & defensive** — every network length is validated before allocation;
   capped concurrent streams; rate-limited discovery replies; idle streams expire.
 
-## Requirements
+## Install
+
+From npm (prebuilt binary for your platform is fetched automatically):
+
+```sh
+npm install -g remote-au
+remote-au --help
+```
+
+Supported targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
+`win32-x64`. The `remote-au` package is a thin launcher; npm installs the matching
+`remote-au-<platform>-<arch>` binary package via optional dependencies.
+
+### Build from source
+
+Requirements:
 
 - **Go 1.24+**
 - **A C toolchain** (the audio backend is [miniaudio](https://miniaud.io/) via
@@ -54,8 +69,6 @@ audio out of one machine's speakers**, not to expose it as a virtual mic.
   - **macOS** — Xcode Command Line Tools (`xcode-select --install`).
   - **Linux** — GCC/Clang and ALSA/PulseAudio/PipeWire dev headers.
   - **Windows** — MinGW-w64 (`gcc`). MSVC is not supported by cgo.
-
-## Build
 
 ```sh
 git clone https://github.com/leaperone/remote-au.git
@@ -225,6 +238,24 @@ allocation-free in steady state.
 - **Mobile** senders (Android / iOS) are not covered — that's a separate, larger
   effort.
 - macOS system-audio capture needs a virtual device (see platform notes).
+
+## Releasing (maintainers)
+
+Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+One-time setup: add an npm **automation token** as the repository secret
+`NPM_TOKEN` (npm → Access Tokens → Generate → Automation).
+
+Then cut a release by pushing a semver tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+CI builds the cgo binary on each platform's native runner, assembles the
+per-platform npm packages (`remote-au-<platform>-<arch>`), publishes them and the
+main `remote-au` package to npm, and attaches the raw binaries to a GitHub Release.
 
 ## License
 

@@ -1,0 +1,151 @@
+name: release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# This builds the cgo binary on each platform's native runner, assembles the
+# per-platform npm packages, then publishes them + the main "remote-au" package
+# to npm and attaches the raw binaries to a GitHub Release.
+#
+# One-time setup required:
+#   - Add an npm automation token as the repo secret NPM_TOKEN
+#     (npm: Access Tokens -> Generate -> Automation).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  build:
+    name: build ${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,        npm_platform: darwin, npm_arch: arm64, goos: darwin,  goarch: arm64 }
+          - { runner: macos-13,        npm_platform: darwin, npm_arch: x64,   goos: darwin,  goarch: amd64 }
+          - { runner: ubuntu-latest,   npm_platform: linux,  npm_arch: x64,   goos: linux,   goarch: amd64 }
+          - { runner: ubuntu-24.04-arm, npm_platform: linux, npm_arch: arm64, goos: linux,   goarch: arm64 }
+          - { runner: windows-latest,  npm_platform: win32,  npm_arch: x64,   goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install MinGW (Windows cgo toolchain)
+        if: matrix.npm_platform == 'win32'
+        run: choco install mingw -y --no-progress
+
+      - name: Build binary
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out=remote-au
+          if [ "${{ matrix.npm_platform }}" = "win32" ]; then out=remote-au.exe; fi
+          go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/remote-au
+          ls -la "$out"
+
+      - name: Assemble platform package
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          bin=remote-au
+          if [ "${{ matrix.npm_platform }}" = "win32" ]; then bin=remote-au.exe; fi
+          node scripts/make-platform-pkg.mjs \
+            --platform ${{ matrix.npm_platform }} \
+            --arch ${{ matrix.npm_arch }} \
+            --binary "$bin" \
+            --version "$ver" \
+            --outdir npm
+
+      - name: Upload platform package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
+          path: npm/remote-au-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
+          if-no-files-found: error
+
+      - name: Upload raw binary (for GitHub Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
+          path: |
+            remote-au
+            remote-au.exe
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm + GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          path: npm
+          merge-multiple: false
+
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+
+      - name: Set release version
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Publish per-platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          for dir in npm/pkg-*; do
+            echo "publishing $dir"
+            npm publish "$dir" --access public
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Stage release binaries
+        run: |
+          set -e
+          mkdir -p release
+          for d in dist/bin-*; do
+            target="${d#dist/bin-}"
+            if [ -f "$d/remote-au.exe" ]; then
+              cp "$d/remote-au.exe" "release/remote-au-${target}.exe"
+            else
+              cp "$d/remote-au" "release/remote-au-${target}"
+            fi
+          done
+          ls -la release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

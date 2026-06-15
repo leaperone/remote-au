@@ -2,3 +2,7 @@
 /remote-au
 *.o
 *.a
+node_modules/
+/npm/
+/dist/
+/release/

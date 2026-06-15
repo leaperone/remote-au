@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+'use strict';
+
+// Launcher for the remote-au CLI. The actual program is a Go + cgo binary
+// shipped per platform as an optional dependency (remote-au-<platform>-<arch>).
+// npm installs only the package matching the host's os/cpu; this shim resolves
+// that package's binary and execs it, forwarding all arguments and stdio.
+
+const { spawnSync } = require('node:child_process');
+
+const platform = process.platform;
+const arch = process.arch;
+const pkg = `remote-au-${platform}-${arch}`;
+const exe = platform === 'win32' ? 'remote-au.exe' : 'remote-au';
+
+let binary;
+try {
+  binary = require.resolve(`${pkg}/bin/${exe}`);
+} catch {
+  console.error(`remote-au: no prebuilt binary available for ${platform}-${arch}.`);
+  console.error(`Expected the optional dependency "${pkg}" to be installed.`);
+  console.error('Supported targets: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64.');
+  console.error('Try reinstalling with optional dependencies enabled:');
+  console.error('  npm install -g remote-au');
+  console.error('Or build from source: https://github.com/leaperone/remote-au');
+  process.exit(1);
+}
+
+const result = spawnSync(binary, process.argv.slice(2), { stdio: 'inherit' });
+if (result.error) {
+  console.error(`remote-au: failed to launch ${binary}: ${result.error.message}`);
+  process.exit(1);
+}
+// Propagate signal-terminated exits as conventional 128+signal codes.
+if (result.signal) {
+  process.exit(1);
+}
+process.exit(result.status === null ? 1 : result.status);
