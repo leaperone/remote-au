@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, '..');
 const { version } = createRequire(import.meta.url)(join(pkgRoot, 'package.json'));
 
-const SUPPORTED = new Set(['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64', 'win32-x64']);
+const SUPPORTED = new Set(['darwin-arm64', 'linux-x64', 'linux-arm64', 'win32-x64']);
 const platform = process.platform;
 const arch = process.arch;
 const key = `${platform}-${arch}`;

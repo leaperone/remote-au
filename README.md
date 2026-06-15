@@ -59,8 +59,7 @@ rau --help
 The CLI is available under two command names — the full `remote-au` and the short
 `rau` — they are identical.
 
-Supported targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
-`win32-x64`. The `@leaperone/remote-au` package is a thin launcher; its install
+Supported targets: `darwin-arm64`, `linux-x64`, `linux-arm64`, `win32-x64`. The `@leaperone/remote-au` package is a thin launcher; its install
 script downloads the matching prebuilt binary from the GitHub Release. This needs
 network access at install time and does **not** work with `--ignore-scripts`. If you
 prefer no install scripts, build from source instead (below).

@@ -19,7 +19,7 @@ if (!existsSync(binary)) {
   console.error(`remote-au: native binary not found at ${binary}.`);
   console.error(`Platform: ${platform}-${arch}.`);
   console.error('The postinstall download may have been skipped (e.g. --ignore-scripts)');
-  console.error('or your platform is unsupported (darwin-arm64, darwin-x64, linux-x64,');
+  console.error('or your platform is unsupported (darwin-arm64, linux-x64,');
   console.error('linux-arm64, win32-x64).');
   console.error('Reinstall allowing scripts:  npm install -g @leaperone/remote-au');
   console.error('Or build from source: https://github.com/leaperone/remote-au');

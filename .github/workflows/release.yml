@@ -33,7 +33,6 @@ jobs:
       matrix:
         include:
           - { runner: macos-14,         npm_platform: darwin, npm_arch: arm64, goos: darwin,  goarch: arm64 }
-          - { runner: macos-13,         npm_platform: darwin, npm_arch: x64,   goos: darwin,  goarch: amd64 }
           - { runner: ubuntu-latest,    npm_platform: linux,  npm_arch: x64,   goos: linux,   goarch: amd64 }
           - { runner: ubuntu-24.04-arm, npm_platform: linux,  npm_arch: arm64, goos: linux,   goarch: arm64 }
           - { runner: windows-latest,   npm_platform: win32,  npm_arch: x64,   goos: windows, goarch: amd64 }
