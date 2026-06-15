@@ -228,4 +228,4 @@ allocation-free in steady state.
 
 ## License
 
-Not yet specified.
+[MIT](LICENSE) © leaperone
