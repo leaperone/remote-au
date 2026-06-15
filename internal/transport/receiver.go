@@ -87,17 +87,24 @@ func (r *Receiver) Run(ctx context.Context, addr string) error {
 		addr = ":47000"
 	}
 
-	// Per-Run context so any exit (ctx cancel OR a fatal Accept error) tears
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return r.RunListener(ctx, ln)
+}
+
+func (r *Receiver) RunListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return fmt.Errorf("listener is required")
+	}
+
+	// Per-run context so any exit (ctx cancel OR a fatal Accept error) tears
 	// down the listener and any active stream handler, preventing goroutine/fd
 	// leaks outside the normal cancellation path.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	lc := net.ListenConfig{}
-	ln, err := lc.Listen(runCtx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
-	}
 
 	r.logf("listening on %s", ln.Addr())
 	var handlers sync.WaitGroup

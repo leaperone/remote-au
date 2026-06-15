@@ -6,12 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/discovery"
 	"remote-au/internal/stats"
 	"remote-au/internal/transport"
 )
@@ -148,8 +152,14 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fs.SetOutput(stderr)
 	addr := ":47000"
 	deviceIndex := -1
+	discoveryPort := 47001
+	name := defaultHostname()
+	noDiscovery := false
 	fs.StringVar(&addr, "addr", addr, "TCP listen address")
 	fs.IntVar(&deviceIndex, "device", deviceIndex, "playback device index from devices")
+	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
+	fs.StringVar(&name, "name", name, "discovery name")
+	fs.BoolVar(&noDiscovery, "no-discovery", noDiscovery, "disable UDP discovery responder")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -165,18 +175,34 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	defer func() {
+		_ = ln.Close()
+	}()
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("unexpected TCP listener address type %T", ln.Addr())
+	}
+
 	playbackOpts := audio.PlaybackOptions{
 		Format:  format,
 		Pull:    receiver.Pull,
 		Verbose: verbose,
 	}
 	if deviceIndex >= 0 {
-		deviceID, name, err := audio.PlaybackDeviceByIndex(deviceIndex, verbose)
+		deviceID, devName, err := audio.PlaybackDeviceByIndex(deviceIndex, verbose)
 		if err != nil {
 			return err
 		}
 		playbackOpts.DeviceID = deviceID
-		fmt.Fprintf(stdout, "playback device: [%d] %s\n", deviceIndex, name)
+		fmt.Fprintf(stdout, "playback device: [%d] %s\n", deviceIndex, devName)
 	}
 
 	playback, err := audio.OpenPlaybackWithOptions(playbackOpts)
@@ -193,15 +219,33 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fmt.Fprintf(stdout, "recv using %s\n", format)
 	fmt.Fprintln(stdout, "Press Ctrl-C to stop.")
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	if verbose {
 		go printReceiverStats(ctx, stdout, receiver, 2*time.Second)
 	}
 
-	if err := receiver.Run(ctx, addr); err != nil {
+	discoveryErr := make(chan error, 1)
+	if noDiscovery {
+		fmt.Fprintln(stdout, "discovery disabled")
+	} else if isLoopbackOnlyTCPAddr(tcpAddr) {
+		fmt.Fprintf(stdout, "discovery disabled: TCP listener is loopback-only (%s), so LAN discovery will not advertise it\n", tcpAddr)
+	} else {
+		advertisedAddr := advertisedDiscoveryAddr(tcpAddr)
+		fmt.Fprintf(stdout, "listening for discovery on UDP :%d as %q\n", discoveryPort, name)
+		go func() {
+			if err := discovery.RunResponder(ctx, discoveryPort, tcpAddr.Port, name, advertisedAddr, verboseLogf(stdout, verbose)); err != nil && ctx.Err() == nil {
+				discoveryErr <- err
+				stop()
+			}
+		}()
+	}
+
+	if err := receiver.RunListener(ctx, ln); err != nil {
 		return err
+	}
+	select {
+	case err := <-discoveryErr:
+		return fmt.Errorf("discovery responder: %w", err)
+	default:
 	}
 	fmt.Fprint(stdout, "\nrecv stopped\n")
 	return nil
@@ -211,9 +255,17 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	to := ""
+	peerName := ""
+	discoverTimeout := 1500 * time.Millisecond
+	discoveryPort := 47001
+	name := defaultHostname()
 	sourceName := "mic"
 	deviceIndex := -1
-	fs.StringVar(&to, "to", to, "receiver TCP address, for example 127.0.0.1:47000")
+	fs.StringVar(&to, "to", to, "receiver TCP address, for example 127.0.0.1:47000; skips LAN discovery")
+	fs.StringVar(&peerName, "peer", peerName, "discovered receiver name to require; discovery trusts the LAN, so use --to or --peer on untrusted networks")
+	fs.DurationVar(&discoverTimeout, "discover-timeout", discoverTimeout, "UDP discovery timeout")
+	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port")
+	fs.StringVar(&name, "name", name, "sender name")
 	fs.StringVar(&sourceName, "source", sourceName, "capture source: mic or loopback")
 	fs.IntVar(&deviceIndex, "device", deviceIndex, "capture device index from devices; loopback uses playback device index on Windows")
 	if err := fs.Parse(args); err != nil {
@@ -222,13 +274,28 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	if fs.NArg() != 0 {
 		return fmt.Errorf("send takes no positional arguments: %v", fs.Args())
 	}
-	if to == "" {
-		return fmt.Errorf("send requires --to <ip:port>")
-	}
 
 	source, err := parseCaptureSource(sourceName)
 	if err != nil {
 		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if to == "" {
+		fmt.Fprintf(stdout, "discovering receivers on UDP :%d for %s\n", discoveryPort, discoverTimeout)
+		peers, err := discovery.Find(ctx, discoveryPort, discoverTimeout, name, verboseLogf(stdout, verbose))
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		to, err = chooseDiscoveredPeer(stdout, peers, peerName)
+		if err != nil {
+			return err
+		}
 	}
 
 	captureOpts := audio.CaptureOptions{
@@ -237,12 +304,12 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		Verbose: verbose,
 	}
 	if deviceIndex >= 0 {
-		deviceID, name, err := audio.CaptureDeviceByIndex(deviceIndex, source, verbose)
+		deviceID, devName, err := audio.CaptureDeviceByIndex(deviceIndex, source, verbose)
 		if err != nil {
 			return err
 		}
 		captureOpts.DeviceID = deviceID
-		fmt.Fprintf(stdout, "capture device: [%d] %s\n", deviceIndex, name)
+		fmt.Fprintf(stdout, "capture device: [%d] %s\n", deviceIndex, devName)
 	}
 
 	capture, err := audio.OpenCapture(captureOpts)
@@ -257,16 +324,8 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		return err
 	}
 
-	name, err := os.Hostname()
-	if err != nil || name == "" {
-		name = "remote-au"
-	}
-
 	fmt.Fprintf(stdout, "send using %s, source=%s\n", format, sourceName)
 	fmt.Fprintln(stdout, "Press Ctrl-C to stop.")
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if err := transport.RunSender(ctx, transport.SenderOptions{
 		Address: to,
@@ -291,10 +350,105 @@ func parseCaptureSource(name string) (audio.CaptureSource, error) {
 	}
 }
 
+func defaultHostname() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "remote-au"
+	}
+	return name
+}
+
+func isLoopbackOnlyTCPAddr(addr *net.TCPAddr) bool {
+	return addr != nil && addr.IP != nil && addr.IP.IsLoopback()
+}
+
+func advertisedDiscoveryAddr(addr *net.TCPAddr) netip.Addr {
+	if addr == nil || addr.IP == nil || addr.IP.IsUnspecified() {
+		return netip.AddrFrom4([4]byte{})
+	}
+	ip4 := addr.IP.To4()
+	if ip4 == nil {
+		return netip.AddrFrom4([4]byte{})
+	}
+	var raw [4]byte
+	copy(raw[:], ip4)
+	return netip.AddrFrom4(raw)
+}
+
 func writerLogf(w io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		fmt.Fprintf(w, format+"\n", args...)
 	}
+}
+
+func verboseLogf(w io.Writer, verbose bool) func(format string, args ...any) {
+	if !verbose {
+		return nil
+	}
+	return writerLogf(w)
+}
+
+func chooseDiscoveredPeer(w io.Writer, peers []discovery.Peer, peerName string) (string, error) {
+	if len(peers) == 0 {
+		return "", fmt.Errorf("no receivers discovered; use --to <ip:port> to connect manually")
+	}
+
+	if peerName != "" {
+		var match discovery.Peer
+		matches := 0
+		for _, peer := range peers {
+			if peer.Name == peerName {
+				match = peer
+				matches++
+			}
+		}
+		if matches == 1 {
+			printDiscoveredPeer(w, match)
+			return match.Addr, nil
+		}
+		printDiscoveredPeers(w, peers)
+		if matches == 0 && len(peers) == 1 {
+			return "", fmt.Errorf("--peer %q did not match discovered receiver %s; use --to <ip:port> or the discovered --peer name", peerName, displayPeerName(peers[0].Name))
+		}
+		if matches == 0 {
+			return "", fmt.Errorf("--peer %q did not match any discovered receiver; use --to <ip:port> or one of the listed --peer names", peerName)
+		}
+		return "", fmt.Errorf("--peer %q matched multiple receiver instances; use --to <ip:port> or a unique --peer name", peerName)
+	}
+
+	if len(peers) == 1 {
+		printDiscoveredPeer(w, peers[0])
+		return peers[0].Addr, nil
+	}
+
+	printDiscoveredPeers(w, peers)
+	return "", fmt.Errorf("multiple receivers discovered; use --to <ip:port> or --peer <name>")
+}
+
+func printDiscoveredPeer(w io.Writer, peer discovery.Peer) {
+	fmt.Fprintf(w, "AUTO-CONNECTING to discovered LAN peer %s at %s\n", displayPeerName(peer.Name), peer.Addr)
+}
+
+func printDiscoveredPeers(w io.Writer, peers []discovery.Peer) {
+	fmt.Fprintln(w, "discovered receivers:")
+	for _, peer := range peers {
+		fmt.Fprintf(w, "  %s\t%s\n", displayPeerName(peer.Name), peerAddressSummary(peer))
+	}
+}
+
+func peerAddressSummary(peer discovery.Peer) string {
+	if len(peer.Addrs) <= 1 {
+		return peer.Addr
+	}
+	return fmt.Sprintf("%s (observed: %s)", peer.Addr, strings.Join(peer.Addrs, ", "))
+}
+
+func displayPeerName(name string) string {
+	name = stats.SafeDisplayName(name)
+	if name == "" {
+		return "(unnamed)"
+	}
+	return name
 }
 
 func printReceiverStats(ctx context.Context, w io.Writer, receiver *transport.Receiver, interval time.Duration) {

@@ -1,0 +1,354 @@
+package discovery
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net"
+	"net/netip"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestDecodeRejectsMalformedPackets(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "short header",
+			data: []byte("RAUD\x01\x01\x00\x00"),
+		},
+		{
+			name: "over max packet bytes",
+			data: bytes.Repeat([]byte{0}, MaxPacketBytes+1),
+		},
+		{
+			name: "wrong magic",
+			data: []byte("NOPE\x01\x01\x00\x00\x00"),
+		},
+		{
+			name: "wrong version",
+			data: []byte("RAUD\x02\x01\x00\x00\x00"),
+		},
+		{
+			name: "wrong type",
+			data: []byte("RAUD\x01\x03\x00\x00\x00"),
+		},
+		{
+			name: "query tcp port nonzero",
+			data: []byte("RAUD\x01\x01\x12\x34\x00"),
+		},
+		{
+			name: "announce tcp port zero",
+			data: []byte("RAUD\x01\x02\x00\x00\x00"),
+		},
+		{
+			name: "name length trailing bytes",
+			data: []byte("RAUD\x01\x01\x00\x00\x00x"),
+		},
+		{
+			name: "name length short packet",
+			data: []byte("RAUD\x01\x01\x00\x00\x02x"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Decode(tt.data); err == nil {
+				t.Fatal("Decode returned nil error")
+			}
+		})
+	}
+}
+
+func TestQueryRoundTrip(t *testing.T) {
+	packet, err := EncodeQuery(Query{Name: "sender"})
+	if err != nil {
+		t.Fatalf("EncodeQuery: %v", err)
+	}
+
+	msg, err := Decode(packet)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Type != TypeQuery {
+		t.Fatalf("Type=%d, want %d", msg.Type, TypeQuery)
+	}
+	if msg.Query.Name != "sender" {
+		t.Fatalf("Query.Name=%q, want sender", msg.Query.Name)
+	}
+	if msg.Announce != (Announce{}) {
+		t.Fatalf("Announce=%+v, want zero value", msg.Announce)
+	}
+}
+
+func TestAnnounceRoundTrip(t *testing.T) {
+	instanceID := testInstanceID(7)
+	advertisedAddr := mustAddr(t, "192.168.1.10")
+	packet, err := EncodeAnnounce(Announce{
+		TCPPort:        47000,
+		InstanceID:     instanceID,
+		AdvertisedAddr: advertisedAddr,
+		Name:           "recv-host",
+	})
+	if err != nil {
+		t.Fatalf("EncodeAnnounce: %v", err)
+	}
+
+	msg, err := Decode(packet)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Type != TypeAnnounce {
+		t.Fatalf("Type=%d, want %d", msg.Type, TypeAnnounce)
+	}
+	if msg.Announce.TCPPort != 47000 {
+		t.Fatalf("Announce.TCPPort=%d, want 47000", msg.Announce.TCPPort)
+	}
+	if msg.Announce.InstanceID != instanceID {
+		t.Fatalf("Announce.InstanceID=%x, want %x", msg.Announce.InstanceID, instanceID)
+	}
+	if msg.Announce.AdvertisedAddr != advertisedAddr {
+		t.Fatalf("Announce.AdvertisedAddr=%s, want %s", msg.Announce.AdvertisedAddr, advertisedAddr)
+	}
+	if msg.Announce.Name != "recv-host" {
+		t.Fatalf("Announce.Name=%q, want recv-host", msg.Announce.Name)
+	}
+	if msg.Query != (Query{}) {
+		t.Fatalf("Query=%+v, want zero value", msg.Query)
+	}
+}
+
+func TestMaxNameRoundTrip(t *testing.T) {
+	name := strings.Repeat("x", MaxNameLen)
+	packet, err := EncodeAnnounce(Announce{TCPPort: 1, InstanceID: testInstanceID(1), Name: name})
+	if err != nil {
+		t.Fatalf("EncodeAnnounce: %v", err)
+	}
+	if len(packet) != announceNameOffset+MaxNameLen {
+		t.Fatalf("len(packet)=%d, want %d", len(packet), announceNameOffset+MaxNameLen)
+	}
+
+	msg, err := Decode(packet)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Announce.Name != name {
+		t.Fatalf("Announce.Name length=%d, want %d", len(msg.Announce.Name), len(name))
+	}
+}
+
+func TestPeerInstancesCollapseMultiAddressSameInstance(t *testing.T) {
+	instances := make(map[peerInstanceKey]*peerInstance)
+	logf := func(string, ...any) {}
+	capLogged := false
+
+	announce := Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-host"}
+	addPeerInstance(instances, announce, mustAddr(t, "127.0.0.1"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "169.254.10.20"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logf, &capLogged)
+
+	peers := peerInstancesToPeers(instances)
+	if len(peers) != 1 {
+		t.Fatalf("len(peers)=%d, want 1: %+v", len(peers), peers)
+	}
+	if peers[0].Name != "recv-host" {
+		t.Fatalf("Name=%q, want recv-host", peers[0].Name)
+	}
+	if peers[0].Addr != "192.168.1.20:47000" {
+		t.Fatalf("Addr=%q, want preferred non-loopback non-link-local IPv4", peers[0].Addr)
+	}
+	wantAddrs := []string{"192.168.1.20:47000", "169.254.10.20:47000", "127.0.0.1:47000"}
+	if !reflect.DeepEqual(peers[0].Addrs, wantAddrs) {
+		t.Fatalf("Addrs=%v, want %v", peers[0].Addrs, wantAddrs)
+	}
+}
+
+func TestPeerInstancesKeepDifferentInstanceIDsSeparate(t *testing.T) {
+	instances := make(map[peerInstanceKey]*peerInstance)
+	logf := func(string, ...any) {}
+	capLogged := false
+	src := mustAddr(t, "10.0.0.20")
+
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "alpha"}, src, logf, &capLogged)
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(2), Name: "alpha"}, src, logf, &capLogged)
+
+	peers := peerInstancesToPeers(instances)
+	if len(peers) != 2 {
+		t.Fatalf("len(peers)=%d, want 2: %+v", len(peers), peers)
+	}
+	got := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		got = append(got, peer.Name+" "+peer.Addr)
+	}
+	want := []string{"alpha 10.0.0.20:47000", "alpha 10.0.0.20:47000"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("peers=%v, want %v", got, want)
+	}
+}
+
+func TestPeerAdvertisedAddressOverridesSourceAddress(t *testing.T) {
+	instances := make(map[peerInstanceKey]*peerInstance)
+	logf := func(string, ...any) {}
+	capLogged := false
+
+	announce := Announce{
+		TCPPort:        47000,
+		InstanceID:     testInstanceID(1),
+		AdvertisedAddr: mustAddr(t, "192.168.1.10"),
+		Name:           "recv-host",
+	}
+	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.20"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.21"), logf, &capLogged)
+
+	peers := peerInstancesToPeers(instances)
+	if len(peers) != 1 {
+		t.Fatalf("len(peers)=%d, want 1: %+v", len(peers), peers)
+	}
+	if peers[0].Addr != "192.168.1.10:47000" {
+		t.Fatalf("Addr=%q, want advertised connect address", peers[0].Addr)
+	}
+	wantAddrs := []string{"10.0.0.20:47000", "10.0.0.21:47000"}
+	if !reflect.DeepEqual(peers[0].Addrs, wantAddrs) {
+		t.Fatalf("Addrs=%v, want observed source addresses %v", peers[0].Addrs, wantAddrs)
+	}
+}
+
+func TestPeerInstanceCap(t *testing.T) {
+	instances := make(map[peerInstanceKey]*peerInstance)
+	logf := func(string, ...any) {}
+	capLogged := false
+	src := mustAddr(t, "10.0.0.20")
+
+	for i := range MaxPeerInstances {
+		addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(byte(i)), Name: fmt.Sprintf("peer-%03d", i)}, src, logf, &capLogged)
+	}
+	overflowID := testInstanceID(250)
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: overflowID, Name: "overflow"}, src, logf, &capLogged)
+
+	if len(instances) != MaxPeerInstances {
+		t.Fatalf("len(instances)=%d, want %d", len(instances), MaxPeerInstances)
+	}
+	if _, ok := instances[peerInstanceKey{instanceID: overflowID}]; ok {
+		t.Fatal("overflow instance was collected after cap")
+	}
+	if !capLogged {
+		t.Fatal("capLogged=false, want true")
+	}
+}
+
+func TestReplyRateLimiter(t *testing.T) {
+	now := time.Unix(100, 0)
+	limiter := newReplyRateLimiter(now)
+	for i := range announceReplyBurst {
+		if !limiter.Allow(now) {
+			t.Fatalf("Allow burst token %d=false, want true", i)
+		}
+	}
+	if limiter.Allow(now) {
+		t.Fatal("Allow over burst=true, want false")
+	}
+	if !limiter.Allow(now.Add(announceReplyInterval)) {
+		t.Fatal("Allow after refill=false, want true")
+	}
+}
+
+func TestRunResponderReturnsOnContextCancel(t *testing.T) {
+	port := freeUDPPort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan struct{})
+	var once sync.Once
+	done := make(chan error, 1)
+	go func() {
+		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), func(string, ...any) {
+			once.Do(func() { close(ready) })
+		})
+	}()
+
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("RunResponder returned before cancel: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("RunResponder did not start listening")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunResponder returned error after ctx cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunResponder did not return promptly after ctx cancel")
+	}
+}
+
+func TestResponderLoopReturnsOnFatalSocketError(t *testing.T) {
+	conn := listenUDPForTest(t, 0)
+	announce, err := EncodeAnnounce(Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-host"})
+	if err != nil {
+		t.Fatalf("EncodeAnnounce: %v", err)
+	}
+
+	done := make(chan error, 1)
+	limiter := newReplyRateLimiter(time.Now())
+	go func() {
+		done <- runResponderLoop(context.Background(), conn, announce, &limiter, nil)
+	}()
+	_ = conn.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("runResponderLoop returned nil after fatal socket close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runResponderLoop did not return promptly after fatal socket close")
+	}
+}
+
+func mustAddr(t *testing.T, raw string) netip.Addr {
+	t.Helper()
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		t.Fatalf("ParseAddr(%q): %v", raw, err)
+	}
+	return addr
+}
+
+func testInstanceID(seed byte) InstanceID {
+	var id InstanceID
+	for i := range id {
+		id[i] = seed + byte(i)
+	}
+	return id
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	conn := listenUDPForTest(t, 0)
+	defer func() {
+		_ = conn.Close()
+	}()
+	return conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+func listenUDPForTest(t *testing.T, port int) *net.UDPConn {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("UDP listen unavailable in this environment: %v", err)
+		}
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	return conn
+}
