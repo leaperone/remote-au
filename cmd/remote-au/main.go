@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,8 @@ import (
 	"remote-au/internal/stats"
 	"remote-au/internal/transport"
 )
+
+var discoveryFindPorts = discovery.FindPorts
 
 type globalOptions struct {
 	rate     int
@@ -298,24 +301,27 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		return err
 	}
 
+	var resolve func(context.Context) (string, error)
+	if to == "" {
+		// Fail fast on bad discovery config so it never enters the retry loop
+		// (only "no receiver found" should be retryable).
+		if discoveryPort < 0 || discoveryPort > 65535 {
+			return fmt.Errorf("invalid --discovery-port %d: must be 0 (auto) or 1-65535", discoveryPort)
+		}
+		if discoverTimeout <= 0 {
+			return fmt.Errorf("invalid --discover-timeout %s: must be positive", discoverTimeout)
+		}
+		discoveryPorts := discoveryPortsForFlag(discoveryPort)
+		resolve = newDiscoveredPeerResolver(stdout, discoveryPorts, discoverTimeout, name, peerName, verbose)
+	} else {
+		if err := validateReceiverAddress(to); err != nil {
+			return err
+		}
+		resolve = newFixedPeerResolver(to)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if to == "" {
-		discoveryPorts := discoveryPortsForFlag(discoveryPort)
-		fmt.Fprintf(stdout, "discovering receivers on UDP %s for %s\n", discoveryPortLabel(discoveryPorts), discoverTimeout)
-		peers, err := discovery.FindPorts(ctx, discoveryPorts, discoverTimeout, name, verboseLogf(stdout, verbose))
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		}
-		to, err = chooseDiscoveredPeer(stdout, peers, peerName)
-		if err != nil {
-			return err
-		}
-	}
 
 	captureOpts := audio.CaptureOptions{
 		Format:  format,
@@ -347,7 +353,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fmt.Fprintln(stdout, "Press Ctrl-C to stop.")
 
 	if err := transport.RunSender(ctx, transport.SenderOptions{
-		Address:   to,
+		Resolve:   resolve,
 		Capture:   capture,
 		Name:      name,
 		Transport: senderTransport,
@@ -378,6 +384,46 @@ func parseSenderTransport(name string) (transport.SenderTransport, error) {
 		return transport.TransportTCP, nil
 	default:
 		return "", fmt.Errorf("unknown transport %q (want udp or tcp)", name)
+	}
+}
+
+func validateReceiverAddress(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid --to address %q: expected host:port", addr)
+	}
+	if host == "" {
+		return fmt.Errorf("invalid --to address %q: host is required", addr)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("invalid --to address %q: port must be 1-65535", addr)
+	}
+	return nil
+}
+
+func newFixedPeerResolver(addr string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) {
+		return addr, nil
+	}
+}
+
+func newDiscoveredPeerResolver(w io.Writer, ports []int, timeout time.Duration, senderName, peerName string, verbose bool) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		fmt.Fprintf(w, "discovering receivers on UDP %s for %s\n", discoveryPortLabel(ports), timeout)
+		peers, err := discoveryFindPorts(ctx, ports, timeout, senderName, verboseLogf(w, verbose))
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(w, "waiting for a receiver: %v\n", err)
+			}
+			return "", err
+		}
+		addr, err := chooseDiscoveredPeer(w, peers, peerName)
+		if err != nil {
+			fmt.Fprintf(w, "waiting for a receiver: %v\n", err)
+			return "", err
+		}
+		return addr, nil
 	}
 }
 
@@ -444,8 +490,20 @@ func verboseLogf(w io.Writer, verbose bool) func(format string, args ...any) {
 }
 
 func chooseDiscoveredPeer(w io.Writer, peers []discovery.Peer, peerName string) (string, error) {
+	peer, err := selectDiscoveredPeer(peers, peerName)
+	if err != nil {
+		if len(peers) > 0 && (peerName != "" || len(peers) > 1) {
+			printDiscoveredPeers(w, peers)
+		}
+		return "", err
+	}
+	printDiscoveredPeer(w, peer)
+	return peer.Addr, nil
+}
+
+func selectDiscoveredPeer(peers []discovery.Peer, peerName string) (discovery.Peer, error) {
 	if len(peers) == 0 {
-		return "", fmt.Errorf("no receivers discovered; use --to <ip:port> to connect manually")
+		return discovery.Peer{}, fmt.Errorf("no receivers discovered; use --to <ip:port> to connect manually")
 	}
 
 	if peerName != "" {
@@ -458,26 +516,22 @@ func chooseDiscoveredPeer(w io.Writer, peers []discovery.Peer, peerName string) 
 			}
 		}
 		if matches == 1 {
-			printDiscoveredPeer(w, match)
-			return match.Addr, nil
+			return match, nil
 		}
-		printDiscoveredPeers(w, peers)
 		if matches == 0 && len(peers) == 1 {
-			return "", fmt.Errorf("--peer %q did not match discovered receiver %s; use --to <ip:port> or the discovered --peer name", peerName, displayPeerName(peers[0].Name))
+			return discovery.Peer{}, fmt.Errorf("--peer %q did not match discovered receiver %s; use --to <ip:port> or the discovered --peer name", peerName, displayPeerName(peers[0].Name))
 		}
 		if matches == 0 {
-			return "", fmt.Errorf("--peer %q did not match any discovered receiver; use --to <ip:port> or one of the listed --peer names", peerName)
+			return discovery.Peer{}, fmt.Errorf("--peer %q did not match any discovered receiver; use --to <ip:port> or one of the listed --peer names", peerName)
 		}
-		return "", fmt.Errorf("--peer %q matched multiple receiver instances; use --to <ip:port> or a unique --peer name", peerName)
+		return discovery.Peer{}, fmt.Errorf("--peer %q matched multiple receiver instances; use --to <ip:port> or a unique --peer name", peerName)
 	}
 
 	if len(peers) == 1 {
-		printDiscoveredPeer(w, peers[0])
-		return peers[0].Addr, nil
+		return peers[0], nil
 	}
 
-	printDiscoveredPeers(w, peers)
-	return "", fmt.Errorf("multiple receivers discovered; use --to <ip:port> or --peer <name>")
+	return discovery.Peer{}, fmt.Errorf("multiple receivers discovered; use --to <ip:port> or --peer <name>")
 }
 
 func printDiscoveredPeer(w io.Writer, peer discovery.Peer) {

@@ -72,12 +72,38 @@ func TestUDPSenderSendsHelloFirstTickerAndChunkedAudio(t *testing.T) {
 
 func TestUDPWriteErrorClassification(t *testing.T) {
 	portUnreachable := &net.OpError{Op: "write", Net: "udp", Err: syscall.ECONNREFUSED}
-	if !isTransientUDPWriteError(portUnreachable) {
-		t.Fatalf("ECONNREFUSED write error classified as unrecoverable")
+	if isTransientUDPWriteError(portUnreachable) {
+		t.Fatalf("ECONNREFUSED write error classified as transient")
 	}
 	if isTransientUDPWriteError(net.ErrClosed) {
 		t.Fatalf("net.ErrClosed classified as transient")
 	}
+	wouldBlock := &net.OpError{Op: "write", Net: "udp", Err: syscall.EAGAIN}
+	if !isTransientUDPWriteError(wouldBlock) {
+		t.Fatalf("EAGAIN write error classified as unrecoverable")
+	}
+	temporary := temporaryUDPWriteError{}
+	if !isTransientUDPWriteError(temporary) {
+		t.Fatalf("temporary write error classified as unrecoverable")
+	}
+	addrNotAvailable := &net.OpError{Op: "write", Net: "udp", Err: syscall.EADDRNOTAVAIL}
+	if isTransientUDPWriteError(addrNotAvailable) {
+		t.Fatalf("EADDRNOTAVAIL write error classified as transient")
+	}
+}
+
+type temporaryUDPWriteError struct{}
+
+func (temporaryUDPWriteError) Error() string {
+	return "temporary"
+}
+
+func (temporaryUDPWriteError) Timeout() bool {
+	return false
+}
+
+func (temporaryUDPWriteError) Temporary() bool {
+	return true
 }
 
 type fakeCapture struct {

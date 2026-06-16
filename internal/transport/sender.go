@@ -14,9 +14,12 @@ import (
 )
 
 const (
-	defaultWriteTimeout = 2 * time.Second
-	capturePollInterval = 2 * time.Millisecond
-	helloInterval       = time.Second
+	defaultWriteTimeout          = 2 * time.Second
+	defaultReconnectMinDelay     = 100 * time.Millisecond
+	defaultReconnectMaxDelay     = 5 * time.Second
+	defaultReconnectHealthyAfter = 2 * time.Second
+	capturePollInterval          = 2 * time.Millisecond
+	helloInterval                = time.Second
 )
 
 type Capture interface {
@@ -32,16 +35,29 @@ const (
 )
 
 type SenderOptions struct {
-	Address      string
-	Capture      Capture
-	Name         string
-	Transport    SenderTransport
-	WriteTimeout time.Duration
-	Logf         func(format string, args ...any)
+	Address               string
+	Resolve               func(context.Context) (string, error)
+	Capture               Capture
+	Name                  string
+	Transport             SenderTransport
+	WriteTimeout          time.Duration
+	ReconnectMinDelay     time.Duration
+	ReconnectMaxDelay     time.Duration
+	ReconnectHealthyAfter time.Duration
+	Logf                  func(format string, args ...any)
+
+	dialContext func(context.Context, string, string) (net.Conn, error)
+	now         func() time.Time
+	sleep       func(context.Context, time.Duration) bool
+}
+
+type attemptStats struct {
+	elapsed          time.Duration
+	successfulWrites int
 }
 
 func RunSender(ctx context.Context, opts SenderOptions) error {
-	if opts.Address == "" {
+	if opts.Resolve == nil && opts.Address == "" {
 		return fmt.Errorf("sender address is required")
 	}
 	if opts.Capture == nil {
@@ -56,8 +72,38 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 	if opts.WriteTimeout <= 0 {
 		opts.WriteTimeout = defaultWriteTimeout
 	}
+	if opts.ReconnectMinDelay <= 0 {
+		opts.ReconnectMinDelay = defaultReconnectMinDelay
+	}
+	if opts.ReconnectMaxDelay <= 0 {
+		opts.ReconnectMaxDelay = defaultReconnectMaxDelay
+	}
+	if opts.ReconnectMaxDelay < opts.ReconnectMinDelay {
+		opts.ReconnectMaxDelay = opts.ReconnectMinDelay
+	}
+	if opts.ReconnectHealthyAfter <= 0 {
+		opts.ReconnectHealthyAfter = defaultReconnectHealthyAfter
+	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
+	}
+	if opts.Resolve == nil {
+		addr := opts.Address
+		opts.Resolve = func(context.Context) (string, error) {
+			return addr, nil
+		}
+	}
+	if opts.dialContext == nil {
+		opts.dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialer := net.Dialer{Timeout: opts.WriteTimeout}
+			return dialer.DialContext(ctx, network, address)
+		}
+	}
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	if opts.sleep == nil {
+		opts.sleep = sleepContext
 	}
 
 	hs, err := handshakeFromFormat(opts.Capture.Format(), opts.Name)
@@ -66,122 +112,169 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 	}
 
 	switch opts.Transport {
-	case TransportUDP:
-		return runUDPSender(ctx, opts, hs)
-	case TransportTCP:
-		return runTCPSender(ctx, opts, hs)
+	case TransportUDP, TransportTCP:
 	default:
 		return fmt.Errorf("unsupported sender transport %q (want udp or tcp)", opts.Transport)
 	}
-}
 
-func runTCPSender(ctx context.Context, opts SenderOptions, hs protocol.Handshake) error {
 	var seq uint64
 	var captureFrame uint64
-	dialer := net.Dialer{Timeout: opts.WriteTimeout}
-
-	if err := ctx.Err(); err != nil {
-		return nil
-	}
-
-	opts.Logf("connecting to %s", opts.Address)
-	conn, err := dialer.DialContext(ctx, "tcp", opts.Address)
-	if err != nil {
+	backoff := opts.ReconnectMinDelay
+	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return err
+
+		addr, err := opts.Resolve(ctx)
+		stats := attemptStats{}
+		if err == nil {
+			if addr == "" {
+				err = fmt.Errorf("sender resolver returned empty address")
+			} else {
+				stats, err = runSenderAttempt(ctx, opts, hs, addr, &seq, &captureFrame)
+			}
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			continue
+		}
+
+		if stats.elapsed >= opts.ReconnectHealthyAfter && stats.successfulWrites > 0 {
+			backoff = opts.ReconnectMinDelay
+		}
+		opts.Logf("sender disconnected: %v; reconnecting in %s", err, backoff)
+		if !opts.sleep(ctx, backoff) {
+			return nil
+		}
+		backoff = min(backoff*2, opts.ReconnectMaxDelay)
+	}
+}
+
+func runSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Handshake, addr string, seq, captureFrame *uint64) (attemptStats, error) {
+	start := opts.now()
+	stats := attemptStats{}
+	var err error
+	switch opts.Transport {
+	case TransportUDP:
+		stats, err = runUDPSenderAttempt(ctx, opts, hs, addr, seq, captureFrame)
+	case TransportTCP:
+		stats, err = runTCPSenderAttempt(ctx, opts, hs, addr, seq, captureFrame)
+	default:
+		err = fmt.Errorf("unsupported sender transport %q (want udp or tcp)", opts.Transport)
+	}
+	stats.elapsed = opts.now().Sub(start)
+	return stats, err
+}
+
+func runTCPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Handshake, addr string, seq, captureFrame *uint64) (attemptStats, error) {
+	stats := attemptStats{}
+	if err := ctx.Err(); err != nil {
+		return stats, nil
+	}
+
+	opts.Logf("connecting to %s", addr)
+	conn, err := opts.dialContext(ctx, "tcp", addr)
+	if err != nil {
+		if ctx.Err() != nil {
+			return stats, nil
+		}
+		return stats, err
 	}
 
 	opts.Logf("connected to %s", conn.RemoteAddr())
-	err = sendConnection(ctx, conn, opts.Capture, hs, opts.WriteTimeout, &seq, &captureFrame)
+	err = sendConnection(ctx, conn, opts.Capture, hs, opts.WriteTimeout, seq, captureFrame, &stats)
 	if ctx.Err() != nil {
-		return nil
+		return stats, nil
 	}
-	return err
+	return stats, err
 }
 
-func runUDPSender(ctx context.Context, opts SenderOptions, hs protocol.Handshake) error {
-	dialer := net.Dialer{Timeout: opts.WriteTimeout}
+func runUDPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Handshake, addr string, seq, captureFrame *uint64) (attemptStats, error) {
+	stats := attemptStats{}
 	if err := ctx.Err(); err != nil {
-		return nil
+		return stats, nil
 	}
 
-	opts.Logf("connecting to %s over udp", opts.Address)
-	conn, err := dialer.DialContext(ctx, "udp", opts.Address)
+	opts.Logf("connecting to %s over udp", addr)
+	conn, err := opts.dialContext(ctx, "udp", addr)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil
+			return stats, nil
 		}
-		return err
+		return stats, err
 	}
 	defer conn.Close()
 	opts.Logf("connected to %s over udp", conn.RemoteAddr())
 
 	if err := writeUDPHello(conn, hs, opts.WriteTimeout); err != nil {
-		cont, err := handleUDPWriteError(ctx, opts, "udp hello", err)
-		if !cont {
-			return err
+		if ctx.Err() != nil {
+			return stats, nil
 		}
+		return stats, err
 	}
+	stats.successfulWrites++
 	helloTicker := time.NewTicker(helloInterval)
 	defer helloTicker.Stop()
 
 	bytesPerFrame := opts.Capture.Format().BytesPerFrame()
 	if bytesPerFrame <= 0 {
-		return fmt.Errorf("invalid capture format: %d bytes per frame", bytesPerFrame)
+		return stats, fmt.Errorf("invalid capture format: %d bytes per frame", bytesPerFrame)
 	}
 	chunkFrames := max(1, protocol.MaxUDPAudioPayloadBytes/bytesPerFrame)
 	chunkBytes := chunkFrames * bytesPerFrame
 	packet := make([]byte, chunkBytes)
 	filled := 0
-	var seq uint64
-	var captureFrame uint64
-	packetCaptureFrame := captureFrame
+	packetCaptureFrame := *captureFrame
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return stats, nil
 		case <-helloTicker.C:
 			if err := writeUDPHello(conn, hs, opts.WriteTimeout); err != nil {
 				cont, err := handleUDPWriteError(ctx, opts, "udp hello", err)
 				if !cont {
-					return err
+					return stats, err
 				}
+			} else {
+				stats.successfulWrites++
 			}
 		default:
 		}
 
 		if filled == 0 {
-			packetCaptureFrame = captureFrame
+			packetCaptureFrame = *captureFrame
 		}
 		n := opts.Capture.Read(packet[filled:])
 		if n > 0 {
 			filled += n
-			captureFrame += uint64(n / bytesPerFrame)
+			*captureFrame += uint64(n / bytesPerFrame)
 			if filled < len(packet) {
 				continue
 			}
 
 			frame := protocol.Frame{
-				Seq:          seq,
+				Seq:          *seq,
 				CaptureFrame: packetCaptureFrame,
 				Payload:      packet,
 			}
-			seq++
+			*seq = *seq + 1
 			if err := writeUDPAudio(conn, frame, opts.WriteTimeout); err != nil {
 				cont, err := handleUDPWriteError(ctx, opts, "udp audio", err)
 				if !cont {
-					return err
+					return stats, err
 				}
+			} else {
+				stats.successfulWrites++
 			}
 			filled = 0
 			continue
 		}
 
-		if !sleepContext(ctx, capturePollInterval) {
-			return nil
+		if !opts.sleep(ctx, capturePollInterval) {
+			return stats, nil
 		}
 	}
 }
@@ -208,12 +301,7 @@ func isTransientUDPWriteError(err error) bool {
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
 		return true
 	}
-	return errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.ENETDOWN) ||
-		errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.EAGAIN)
+	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
 }
 
 func writeUDPHello(conn net.Conn, hs protocol.Handshake, timeout time.Duration) error {
@@ -240,16 +328,23 @@ func writeUDPAudio(conn net.Conn, frame protocol.Frame, timeout time.Duration) e
 	return err
 }
 
-func sendConnection(ctx context.Context, conn net.Conn, capture Capture, hs protocol.Handshake, timeout time.Duration, seq, captureFrame *uint64) error {
+func sendConnection(ctx context.Context, conn net.Conn, capture Capture, hs protocol.Handshake, timeout time.Duration, seq, captureFrame *uint64, stats *attemptStats) error {
 	defer conn.Close()
 
 	w := bufio.NewWriterSize(conn, 32*1024)
 	if err := setWriteDeadline(conn, timeout); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	if err := protocol.WriteHandshake(w, hs); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
+	stats.successfulWrites++
 
 	packetBytes, err := hs.ExpectedPayloadBytes()
 	if err != nil {
@@ -283,11 +378,18 @@ func sendConnection(ctx context.Context, conn net.Conn, capture Capture, hs prot
 			}
 			*seq = *seq + 1
 			if err := setWriteDeadline(conn, timeout); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 			if err := protocol.WriteFrame(w, hs, frame); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
+			stats.successfulWrites++
 			filled = 0
 			continue
 		}
