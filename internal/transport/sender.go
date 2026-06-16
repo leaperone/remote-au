@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/logging"
 	"remote-au/internal/protocol"
 )
 
@@ -44,7 +45,7 @@ type SenderOptions struct {
 	ReconnectMinDelay     time.Duration
 	ReconnectMaxDelay     time.Duration
 	ReconnectHealthyAfter time.Duration
-	Logf                  func(format string, args ...any)
+	Logger                logging.Logger
 
 	dialContext func(context.Context, string, string) (net.Conn, error)
 	now         func() time.Time
@@ -84,8 +85,8 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 	if opts.ReconnectHealthyAfter <= 0 {
 		opts.ReconnectHealthyAfter = defaultReconnectHealthyAfter
 	}
-	if opts.Logf == nil {
-		opts.Logf = func(string, ...any) {}
+	if opts.Logger == nil {
+		opts.Logger = logging.Nop()
 	}
 	if opts.Resolve == nil {
 		addr := opts.Address
@@ -144,7 +145,7 @@ func RunSender(ctx context.Context, opts SenderOptions) error {
 		if stats.elapsed >= opts.ReconnectHealthyAfter && stats.successfulWrites > 0 {
 			backoff = opts.ReconnectMinDelay
 		}
-		opts.Logf("sender disconnected: %v; reconnecting in %s", err, backoff)
+		opts.Logger.Warnf("sender disconnected: %v; reconnecting in %s", err, backoff)
 		if !opts.sleep(ctx, backoff) {
 			return nil
 		}
@@ -174,7 +175,7 @@ func runTCPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Ha
 		return stats, nil
 	}
 
-	opts.Logf("connecting to %s", addr)
+	opts.Logger.Infof("connecting to %s", addr)
 	conn, err := opts.dialContext(ctx, "tcp", addr)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -183,7 +184,7 @@ func runTCPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Ha
 		return stats, err
 	}
 
-	opts.Logf("connected to %s", conn.RemoteAddr())
+	opts.Logger.Infof("connected to %s", conn.RemoteAddr())
 	err = sendConnection(ctx, conn, opts.Capture, hs, opts.WriteTimeout, seq, captureFrame, &stats)
 	if ctx.Err() != nil {
 		return stats, nil
@@ -197,7 +198,7 @@ func runUDPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Ha
 		return stats, nil
 	}
 
-	opts.Logf("connecting to %s over udp", addr)
+	opts.Logger.Infof("connecting to %s over udp", addr)
 	conn, err := opts.dialContext(ctx, "udp", addr)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -206,7 +207,7 @@ func runUDPSenderAttempt(ctx context.Context, opts SenderOptions, hs protocol.Ha
 		return stats, err
 	}
 	defer conn.Close()
-	opts.Logf("connected to %s over udp", conn.RemoteAddr())
+	opts.Logger.Infof("connected to %s over udp", conn.RemoteAddr())
 
 	if err := writeUDPHello(conn, hs, opts.WriteTimeout); err != nil {
 		if ctx.Err() != nil {
@@ -286,7 +287,7 @@ func handleUDPWriteError(ctx context.Context, opts SenderOptions, what string, e
 	if !isTransientUDPWriteError(err) {
 		return false, err
 	}
-	opts.Logf("%s write failed transiently: %v", what, err)
+	opts.Logger.Warnf("%s write failed transiently: %v", what, err)
 	return true, nil
 }
 

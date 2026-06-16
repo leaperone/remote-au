@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/gen2brain/malgo"
+
+	"remote-au/internal/logging"
 )
 
 type CaptureSource int
@@ -21,6 +23,7 @@ type CaptureOptions struct {
 	DeviceID   *malgo.DeviceID
 	RingFrames int
 	Verbose    bool
+	Logger     logging.Logger
 }
 
 type Capture struct {
@@ -55,7 +58,7 @@ func OpenCapture(opts CaptureOptions) (*Capture, error) {
 	}
 	ring := newPCMRing(ringFrames*format.BytesPerFrame(), format.BytesPerFrame())
 
-	ctx, err := initContext(opts.Verbose)
+	ctx, err := initContext(opts.Verbose, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("init capture context: %w", err)
 	}

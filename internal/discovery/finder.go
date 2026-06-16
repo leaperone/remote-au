@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"time"
+
+	"remote-au/internal/logging"
 )
 
 const MaxPeerInstances = 128
@@ -37,11 +39,11 @@ type peerInstance struct {
 	addrs          map[netip.Addr]struct{}
 }
 
-func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name string, logf func(format string, args ...any)) ([]Peer, error) {
-	return FindPorts(ctx, []int{discoveryPort}, timeout, name, logf)
+func Find(ctx context.Context, discoveryPort int, timeout time.Duration, name string, logger logging.Logger) ([]Peer, error) {
+	return FindPorts(ctx, []int{discoveryPort}, timeout, name, logger)
 }
 
-func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name string, logf func(format string, args ...any)) ([]Peer, error) {
+func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name string, logger logging.Logger) ([]Peer, error) {
 	normalizedPorts, err := normalizeDiscoveryPorts(ports)
 	if err != nil {
 		return nil, err
@@ -49,8 +51,8 @@ func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name str
 	if timeout <= 0 {
 		return nil, fmt.Errorf("discovery timeout must be positive")
 	}
-	if logf == nil {
-		logf = func(string, ...any) {}
+	if logger == nil {
+		logger = logging.Nop()
 	}
 
 	query, err := EncodeQuery(Query{Name: name})
@@ -82,7 +84,7 @@ func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name str
 	sendQueries := func() {
 		for _, target := range targets {
 			if _, err := conn.WriteToUDPAddrPort(query, target); err != nil {
-				logf("discovery query to %s failed: %v", target, err)
+				logger.Warnf("discovery query to %s failed: %v", target, err)
 			}
 		}
 	}
@@ -129,14 +131,14 @@ func FindPorts(ctx context.Context, ports []int, timeout time.Duration, name str
 
 		msg, err := Decode(buf[:n])
 		if err != nil {
-			logf("ignoring malformed discovery reply from %s: %v", src, err)
+			logger.Debugf("ignoring malformed discovery reply from %s: %v", src, err)
 			continue
 		}
 		if msg.Type != TypeAnnounce {
 			continue
 		}
 
-		addPeerInstance(instances, msg.Announce, src.Addr(), logf, &capLogged)
+		addPeerInstance(instances, msg.Announce, src.Addr(), logger, &capLogged)
 	}
 
 	return peerInstancesToPeers(instances), nil
@@ -157,13 +159,16 @@ func discoveryTargetsForPorts(ports []int) []netip.AddrPort {
 	return targets
 }
 
-func addPeerInstance(instances map[peerInstanceKey]*peerInstance, announce Announce, src netip.Addr, logf func(format string, args ...any), capLogged *bool) {
+func addPeerInstance(instances map[peerInstanceKey]*peerInstance, announce Announce, src netip.Addr, logger logging.Logger, capLogged *bool) {
+	if logger == nil {
+		logger = logging.Nop()
+	}
 	key := peerInstanceKey{instanceID: announce.InstanceID}
 	instance := instances[key]
 	if instance == nil {
 		if len(instances) >= MaxPeerInstances {
 			if capLogged != nil && !*capLogged {
-				logf("discovery peer instance cap reached (%d); ignoring additional instances", MaxPeerInstances)
+				logger.Warnf("discovery peer instance cap reached (%d); ignoring additional instances", MaxPeerInstances)
 				*capLogged = true
 			}
 			return

@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/gen2brain/malgo"
+
+	"remote-au/internal/logging"
 )
 
 type PullFunc func(out []byte, frameCount uint32)
@@ -14,6 +16,7 @@ type PlaybackOptions struct {
 	DeviceID *malgo.DeviceID
 	Pull     PullFunc
 	Verbose  bool
+	Logger   logging.Logger
 }
 
 type Playback struct {
@@ -47,7 +50,7 @@ func OpenPlaybackWithOptions(opts PlaybackOptions) (*Playback, error) {
 		}
 	}
 
-	ctx, err := initContext(opts.Verbose)
+	ctx, err := initContext(opts.Verbose, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("init playback context: %w", err)
 	}

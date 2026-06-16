@@ -54,9 +54,10 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          VERSION=${GITHUB_REF_NAME#v}
           asset=remote-au-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
           if [ "${{ matrix.npm_platform }}" = "win32" ]; then asset="$asset.exe"; fi
-          go build -trimpath -ldflags "-s -w" -o "$asset" ./cmd/remote-au
+          go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$asset" ./cmd/remote-au
           ls -la "$asset"
 
       - name: Upload release asset artifact

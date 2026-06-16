@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,17 +20,29 @@ import (
 
 	"remote-au/internal/audio"
 	"remote-au/internal/discovery"
+	"remote-au/internal/logging"
 	"remote-au/internal/stats"
 	"remote-au/internal/transport"
 )
 
-var discoveryFindPorts = discovery.FindPorts
+var version = "dev"
+
+var (
+	discoveryFindPorts     = discovery.FindPorts
+	encodeDevicesJSON      = audio.EncodeDevicesJSON
+	printDevices           = audio.PrintDevices
+	playbackDeviceSelector = audio.PlaybackDeviceBySelector
+	captureDeviceSelector  = audio.CaptureDeviceBySelector
+)
 
 type globalOptions struct {
-	rate     int
-	channels int
-	frameMS  int
-	verbose  bool
+	rate      int
+	channels  int
+	frameMS   int
+	verbose   bool
+	version   bool
+	logLevel  string
+	logFormat string
 }
 
 func main() {
@@ -39,9 +54,11 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	opts := globalOptions{
-		rate:     audio.DefaultSampleRate,
-		channels: audio.DefaultChannels,
-		frameMS:  audio.DefaultFrameMillis,
+		rate:      audio.DefaultSampleRate,
+		channels:  audio.DefaultChannels,
+		frameMS:   audio.DefaultFrameMillis,
+		logLevel:  "info",
+		logFormat: "text",
 	}
 
 	globals := flag.NewFlagSet("remote-au", flag.ContinueOnError)
@@ -53,11 +70,28 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err := globals.Parse(args); err != nil {
 		return err
 	}
+	opts.logLevel = logging.EffectiveLevel(opts.logLevel, opts.verbose, flagWasSet(globals, "log-level"))
+	logger, err := logging.New(stderr, opts.logLevel, opts.logFormat)
+	if err != nil {
+		return err
+	}
+	effectiveDebug := strings.EqualFold(opts.logLevel, "debug")
 
 	remaining := globals.Args()
+	if opts.version {
+		fmt.Fprintln(stdout, resolveVersion())
+		return nil
+	}
 	if len(remaining) == 0 {
 		printUsage(stderr, globals)
 		return errors.New("missing subcommand")
+	}
+	if remaining[0] == "version" {
+		if len(remaining) != 1 {
+			return fmt.Errorf("version takes no arguments: %v", remaining[1:])
+		}
+		fmt.Fprintln(stdout, resolveVersion())
+		return nil
 	}
 
 	format, err := audio.NewFormat(opts.rate, opts.channels, opts.frameMS)
@@ -67,13 +101,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	switch remaining[0] {
 	case "devices":
-		return runDevices(remaining[1:], stdout, stderr, format, opts.verbose)
+		return runDevices(remaining[1:], stdout, stderr, format, effectiveDebug, logger)
 	case "selftest":
-		return runSelftest(remaining[1:], stdout, stderr, format, opts.verbose)
+		return runSelftest(remaining[1:], stdout, stderr, format, effectiveDebug, logger)
 	case "recv":
-		return runRecv(remaining[1:], stdout, stderr, format, opts.verbose)
+		return runRecv(remaining[1:], stdout, stderr, format, effectiveDebug, logger)
 	case "send":
-		return runSend(remaining[1:], stdout, stderr, format, opts.verbose)
+		return runSend(remaining[1:], stdout, stderr, format, effectiveDebug, logger)
 	default:
 		printUsage(stderr, globals)
 		return fmt.Errorf("unknown subcommand %q", remaining[0])
@@ -85,25 +119,38 @@ func registerGlobalFlags(fs *flag.FlagSet, opts *globalOptions) {
 	fs.IntVar(&opts.channels, "channels", opts.channels, "channel count")
 	fs.IntVar(&opts.frameMS, "frame-ms", opts.frameMS, "PCM packet duration in milliseconds")
 	fs.BoolVar(&opts.verbose, "verbose", opts.verbose, "enable verbose audio backend and stats logging")
+	fs.BoolVar(&opts.version, "version", opts.version, "print version and exit")
+	fs.StringVar(&opts.logLevel, "log-level", opts.logLevel, "diagnostic log level: debug, info, warn, or error")
+	fs.StringVar(&opts.logFormat, "log-format", opts.logFormat, "diagnostic log format: text or json")
 }
 
 func printUsage(w io.Writer, fs *flag.FlagSet) {
-	fmt.Fprintf(w, "Usage: remote-au [global flags] <devices|selftest|recv|send>\n\n")
+	fmt.Fprintf(w, "Usage: remote-au [global flags] <version|devices|selftest|recv|send>\n\n")
 	fmt.Fprintln(w, "Global flags:")
 	fs.PrintDefaults()
 }
 
-func runDevices(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool) error {
-	if len(args) != 0 {
-		return fmt.Errorf("devices takes no arguments: %v", args)
+func runDevices(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool, logger logging.Logger) error {
+	fs := flag.NewFlagSet("devices", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOutput := false
+	fs.BoolVar(&jsonOutput, "json", jsonOutput, "emit device lists as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("devices takes no positional arguments: %v", fs.Args())
 	}
 	if verbose {
 		fmt.Fprintf(stderr, "format: %s, %d bytes per frame\n", format, format.BytesPerFrame())
 	}
-	return audio.PrintDevices(stdout, verbose)
+	if jsonOutput {
+		return encodeDevicesJSON(stdout, verbose, logger)
+	}
+	return printDevices(stdout, verbose, logger)
 }
 
-func runSelftest(args []string, stdout, _ io.Writer, format audio.Format, verbose bool) error {
+func runSelftest(args []string, stdout, _ io.Writer, format audio.Format, verbose bool, logger logging.Logger) error {
 	if len(args) != 0 {
 		return fmt.Errorf("selftest takes no arguments: %v", args)
 	}
@@ -115,6 +162,7 @@ func runSelftest(args []string, stdout, _ io.Writer, format audio.Format, verbos
 		Format:  format,
 		Source:  audio.SourceMicrophone,
 		Verbose: verbose,
+		Logger:  logger,
 	})
 	if err != nil {
 		return err
@@ -123,9 +171,12 @@ func runSelftest(args []string, stdout, _ io.Writer, format audio.Format, verbos
 		_ = capture.Close()
 	}()
 
-	playback, err := audio.OpenPlayback(format, func(out []byte, _ uint32) {
-		capture.TryRead(out)
-	}, verbose)
+	playback, err := audio.OpenPlaybackWithOptions(audio.PlaybackOptions{
+		Format:  format,
+		Pull:    func(out []byte, _ uint32) { capture.TryRead(out) },
+		Verbose: verbose,
+		Logger:  logger,
+	})
 	if err != nil {
 		return err
 	}
@@ -150,16 +201,16 @@ func runSelftest(args []string, stdout, _ io.Writer, format audio.Format, verbos
 	return nil
 }
 
-func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool) error {
+func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool, logger logging.Logger) error {
 	fs := flag.NewFlagSet("recv", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := ":47000"
-	deviceIndex := -1
+	deviceSelector := ""
 	discoveryPort := 0
 	name := defaultHostname()
 	noDiscovery := false
 	fs.StringVar(&addr, "addr", addr, "audio listen address")
-	fs.IntVar(&deviceIndex, "device", deviceIndex, "playback device index from devices")
+	fs.StringVar(&deviceSelector, "device", deviceSelector, "playback device index or name from devices")
 	fs.IntVar(&discoveryPort, "discovery-port", discoveryPort, "UDP discovery port (0 = auto (47001, 48001, 49001))")
 	fs.StringVar(&name, "name", name, "discovery name")
 	fs.BoolVar(&noDiscovery, "no-discovery", noDiscovery, "disable UDP discovery responder")
@@ -172,7 +223,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 
 	receiver, err := transport.NewReceiver(transport.ReceiverOptions{
 		Format: format,
-		Logf:   writerLogf(stdout),
+		Logger: logger,
 	})
 	if err != nil {
 		return err
@@ -205,14 +256,15 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		Format:  format,
 		Pull:    receiver.Pull,
 		Verbose: verbose,
+		Logger:  logger,
 	}
-	if deviceIndex >= 0 {
-		deviceID, devName, err := audio.PlaybackDeviceByIndex(deviceIndex, verbose)
+	if deviceSelectorRequestsSelection(deviceSelector) {
+		deviceID, device, err := playbackDeviceSelector(deviceSelector, verbose, logger)
 		if err != nil {
 			return err
 		}
 		playbackOpts.DeviceID = deviceID
-		fmt.Fprintf(stdout, "playback device: [%d] %s\n", deviceIndex, devName)
+		fmt.Fprintf(stdout, "playback device: [%d] %s\n", device.Index, device.Name)
 	}
 
 	playback, err := audio.OpenPlaybackWithOptions(playbackOpts)
@@ -230,7 +282,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fmt.Fprintln(stdout, "Press Ctrl-C to stop.")
 
 	if verbose {
-		go printReceiverStats(ctx, stdout, receiver, 2*time.Second)
+		go printReceiverStats(ctx, logger, receiver, 2*time.Second)
 	}
 
 	discoveryErr := make(chan error, 1)
@@ -247,7 +299,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		advertisedAddr := advertisedDiscoveryAddr(tcpAddr)
 		fmt.Fprintf(stdout, "listening for discovery on UDP :%d as %q\n", actualDiscoveryPort, name)
 		go func() {
-			if err := discovery.RunResponderOnConn(ctx, discoveryConn, tcpAddr.Port, name, advertisedAddr, verboseLogf(stdout, verbose)); err != nil && ctx.Err() == nil {
+			if err := discovery.RunResponderOnConn(ctx, discoveryConn, tcpAddr.Port, name, advertisedAddr, logger); err != nil && ctx.Err() == nil {
 				discoveryErr <- err
 				stop()
 			}
@@ -266,7 +318,7 @@ func runRecv(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	return nil
 }
 
-func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool) error {
+func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbose bool, logger logging.Logger) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	to := ""
@@ -276,7 +328,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	name := defaultHostname()
 	sourceName := "mic"
 	transportName := string(transport.TransportUDP)
-	deviceIndex := -1
+	deviceSelector := ""
 	fs.StringVar(&to, "to", to, "receiver audio address, for example 127.0.0.1:47000; skips LAN discovery")
 	fs.StringVar(&peerName, "peer", peerName, "discovered receiver name to require; discovery trusts the LAN, so use --to or --peer on untrusted networks")
 	fs.DurationVar(&discoverTimeout, "discover-timeout", discoverTimeout, "UDP discovery timeout")
@@ -284,7 +336,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 	fs.StringVar(&name, "name", name, "sender name")
 	fs.StringVar(&sourceName, "source", sourceName, "capture source: mic or loopback")
 	fs.StringVar(&transportName, "transport", transportName, "audio transport: udp or tcp")
-	fs.IntVar(&deviceIndex, "device", deviceIndex, "capture device index from devices; loopback uses playback device index on Windows")
+	fs.StringVar(&deviceSelector, "device", deviceSelector, "capture device index or name from devices; loopback uses playback device index on Windows")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -312,7 +364,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 			return fmt.Errorf("invalid --discover-timeout %s: must be positive", discoverTimeout)
 		}
 		discoveryPorts := discoveryPortsForFlag(discoveryPort)
-		resolve = newDiscoveredPeerResolver(stdout, discoveryPorts, discoverTimeout, name, peerName, verbose)
+		resolve = newDiscoveredPeerResolver(stdout, discoveryPorts, discoverTimeout, name, peerName, logger)
 	} else {
 		if err := validateReceiverAddress(to); err != nil {
 			return err
@@ -327,14 +379,15 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		Format:  format,
 		Source:  source,
 		Verbose: verbose,
+		Logger:  logger,
 	}
-	if deviceIndex >= 0 {
-		deviceID, devName, err := audio.CaptureDeviceByIndex(deviceIndex, source, verbose)
+	if deviceSelectorRequestsSelection(deviceSelector) {
+		deviceID, device, err := captureDeviceSelector(deviceSelector, source, verbose, logger)
 		if err != nil {
 			return err
 		}
 		captureOpts.DeviceID = deviceID
-		fmt.Fprintf(stdout, "capture device: [%d] %s\n", deviceIndex, devName)
+		fmt.Fprintf(stdout, "capture device: [%d] %s\n", device.Index, device.Name)
 	}
 
 	capture, err := audio.OpenCapture(captureOpts)
@@ -357,7 +410,7 @@ func runSend(args []string, stdout, stderr io.Writer, format audio.Format, verbo
 		Capture:   capture,
 		Name:      name,
 		Transport: senderTransport,
-		Logf:      writerLogf(stdout),
+		Logger:    logger,
 	}); err != nil {
 		return err
 	}
@@ -387,6 +440,15 @@ func parseSenderTransport(name string) (transport.SenderTransport, error) {
 	}
 }
 
+func deviceSelectorRequestsSelection(selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	index, err := strconv.Atoi(selector)
+	return err != nil || index >= 0
+}
+
 func validateReceiverAddress(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -408,10 +470,10 @@ func newFixedPeerResolver(addr string) func(context.Context) (string, error) {
 	}
 }
 
-func newDiscoveredPeerResolver(w io.Writer, ports []int, timeout time.Duration, senderName, peerName string, verbose bool) func(context.Context) (string, error) {
+func newDiscoveredPeerResolver(w io.Writer, ports []int, timeout time.Duration, senderName, peerName string, logger logging.Logger) func(context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		fmt.Fprintf(w, "discovering receivers on UDP %s for %s\n", discoveryPortLabel(ports), timeout)
-		peers, err := discoveryFindPorts(ctx, ports, timeout, senderName, verboseLogf(w, verbose))
+		peers, err := discoveryFindPorts(ctx, ports, timeout, senderName, logger)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(w, "waiting for a receiver: %v\n", err)
@@ -474,19 +536,6 @@ func discoveryPortLabel(ports []int) string {
 		labels = append(labels, fmt.Sprintf(":%d", port))
 	}
 	return strings.Join(labels, ", ")
-}
-
-func writerLogf(w io.Writer) func(format string, args ...any) {
-	return func(format string, args ...any) {
-		fmt.Fprintf(w, format+"\n", args...)
-	}
-}
-
-func verboseLogf(w io.Writer, verbose bool) func(format string, args ...any) {
-	if !verbose {
-		return nil
-	}
-	return writerLogf(w)
 }
 
 func chooseDiscoveredPeer(w io.Writer, peers []discovery.Peer, peerName string) (string, error) {
@@ -560,7 +609,10 @@ func displayPeerName(name string) string {
 	return name
 }
 
-func printReceiverStats(ctx context.Context, w io.Writer, receiver *transport.Receiver, interval time.Duration) {
+func printReceiverStats(ctx context.Context, logger logging.Logger, receiver *transport.Receiver, interval time.Duration) {
+	if logger == nil {
+		logger = logging.Nop()
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -568,7 +620,45 @@ func printReceiverStats(ctx context.Context, w io.Writer, receiver *transport.Re
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			fmt.Fprint(w, stats.FormatVerbose(receiver.Stats()))
+			for _, line := range strings.Split(strings.TrimSpace(stats.FormatVerbose(receiver.Stats())), "\n") {
+				if line != "" {
+					logger.Debugf("%s", line)
+				}
+			}
 		}
 	}
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func resolveVersion() string {
+	if version != "" && version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				return "dev+" + shortRevision(setting.Value)
+			}
+		}
+	}
+	return "dev"
+}
+
+func shortRevision(rev string) string {
+	if len(rev) <= 12 {
+		return rev
+	}
+	return rev[:12]
 }

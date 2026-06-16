@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/logging"
 	"remote-au/internal/protocol"
 )
 
@@ -35,7 +36,7 @@ func TestUDPSenderSendsHelloFirstTickerAndChunkedAudio(t *testing.T) {
 			Name:         "sender",
 			Transport:    TransportUDP,
 			WriteTimeout: 200 * time.Millisecond,
-			Logf:         func(string, ...any) {},
+			Logger:       logging.Nop(),
 		})
 	}()
 	defer func() {

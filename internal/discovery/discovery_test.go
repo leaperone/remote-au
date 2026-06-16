@@ -8,9 +8,10 @@ import (
 	"net/netip"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"remote-au/internal/logging"
 )
 
 func TestDecodeRejectsMalformedPackets(t *testing.T) {
@@ -144,14 +145,14 @@ func TestMaxNameRoundTrip(t *testing.T) {
 
 func TestPeerInstancesCollapseMultiAddressSameInstance(t *testing.T) {
 	instances := make(map[peerInstanceKey]*peerInstance)
-	logf := func(string, ...any) {}
+	logger := logging.Nop()
 	capLogged := false
 
 	announce := Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "recv-host"}
-	addPeerInstance(instances, announce, mustAddr(t, "127.0.0.1"), logf, &capLogged)
-	addPeerInstance(instances, announce, mustAddr(t, "169.254.10.20"), logf, &capLogged)
-	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logf, &capLogged)
-	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "127.0.0.1"), logger, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "169.254.10.20"), logger, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logger, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "192.168.1.20"), logger, &capLogged)
 
 	peers := peerInstancesToPeers(instances)
 	if len(peers) != 1 {
@@ -171,12 +172,12 @@ func TestPeerInstancesCollapseMultiAddressSameInstance(t *testing.T) {
 
 func TestPeerInstancesKeepDifferentInstanceIDsSeparate(t *testing.T) {
 	instances := make(map[peerInstanceKey]*peerInstance)
-	logf := func(string, ...any) {}
+	logger := logging.Nop()
 	capLogged := false
 	src := mustAddr(t, "10.0.0.20")
 
-	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "alpha"}, src, logf, &capLogged)
-	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(2), Name: "alpha"}, src, logf, &capLogged)
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(1), Name: "alpha"}, src, logger, &capLogged)
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(2), Name: "alpha"}, src, logger, &capLogged)
 
 	peers := peerInstancesToPeers(instances)
 	if len(peers) != 2 {
@@ -194,7 +195,7 @@ func TestPeerInstancesKeepDifferentInstanceIDsSeparate(t *testing.T) {
 
 func TestPeerAdvertisedAddressOverridesSourceAddress(t *testing.T) {
 	instances := make(map[peerInstanceKey]*peerInstance)
-	logf := func(string, ...any) {}
+	logger := logging.Nop()
 	capLogged := false
 
 	announce := Announce{
@@ -203,8 +204,8 @@ func TestPeerAdvertisedAddressOverridesSourceAddress(t *testing.T) {
 		AdvertisedAddr: mustAddr(t, "192.168.1.10"),
 		Name:           "recv-host",
 	}
-	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.20"), logf, &capLogged)
-	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.21"), logf, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.20"), logger, &capLogged)
+	addPeerInstance(instances, announce, mustAddr(t, "10.0.0.21"), logger, &capLogged)
 
 	peers := peerInstancesToPeers(instances)
 	if len(peers) != 1 {
@@ -221,15 +222,15 @@ func TestPeerAdvertisedAddressOverridesSourceAddress(t *testing.T) {
 
 func TestPeerInstanceCap(t *testing.T) {
 	instances := make(map[peerInstanceKey]*peerInstance)
-	logf := func(string, ...any) {}
+	logger := logging.Nop()
 	capLogged := false
 	src := mustAddr(t, "10.0.0.20")
 
 	for i := range MaxPeerInstances {
-		addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(byte(i)), Name: fmt.Sprintf("peer-%03d", i)}, src, logf, &capLogged)
+		addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: testInstanceID(byte(i)), Name: fmt.Sprintf("peer-%03d", i)}, src, logger, &capLogged)
 	}
 	overflowID := testInstanceID(250)
-	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: overflowID, Name: "overflow"}, src, logf, &capLogged)
+	addPeerInstance(instances, Announce{TCPPort: 47000, InstanceID: overflowID, Name: "overflow"}, src, logger, &capLogged)
 
 	if len(instances) != MaxPeerInstances {
 		t.Fatalf("len(instances)=%d, want %d", len(instances), MaxPeerInstances)
@@ -263,22 +264,12 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ready := make(chan struct{})
-	var once sync.Once
 	done := make(chan error, 1)
 	go func() {
-		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), func(string, ...any) {
-			once.Do(func() { close(ready) })
-		})
+		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), logging.Nop())
 	}()
 
-	select {
-	case <-ready:
-	case err := <-done:
-		t.Fatalf("RunResponder returned before cancel: %v", err)
-	case <-time.After(time.Second):
-		t.Fatal("RunResponder did not start listening")
-	}
+	waitForResponderDiscovery(t, port, done)
 
 	cancel()
 	select {
@@ -289,6 +280,28 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("RunResponder did not return promptly after ctx cancel")
 	}
+}
+
+func waitForResponderDiscovery(t *testing.T, port int, done <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("RunResponder returned before cancel: %v", err)
+		default:
+		}
+
+		findCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		peers, err := FindPorts(findCtx, []int{port}, 100*time.Millisecond, "sender", logging.Nop())
+		cancel()
+		if err == nil && len(peers) == 1 && peers[0].Name == "recv-host" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("RunResponder did not answer discovery")
 }
 
 func TestListenFirstFallsBackWhenPreferredPortOccupied(t *testing.T) {

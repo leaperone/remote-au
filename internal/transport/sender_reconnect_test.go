@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/logging"
 )
 
 var errForcedWrite = errors.New("forced write error")
@@ -30,7 +31,7 @@ func TestRunSenderReconnectsTCPWriteErrorWithGrowingBackoff(t *testing.T) {
 		ReconnectMinDelay:     10 * time.Millisecond,
 		ReconnectMaxDelay:     80 * time.Millisecond,
 		ReconnectHealthyAfter: time.Second,
-		Logf:                  func(string, ...any) {},
+		Logger:                logging.Nop(),
 		dialContext: func(context.Context, string, string) (net.Conn, error) {
 			dials++
 			return &scriptedConn{
@@ -77,7 +78,7 @@ func TestRunSenderResetsBackoffOnlyAfterHealthyAttempt(t *testing.T) {
 		ReconnectMinDelay:     10 * time.Millisecond,
 		ReconnectMaxDelay:     80 * time.Millisecond,
 		ReconnectHealthyAfter: 2 * time.Second,
-		Logf:                  func(string, ...any) {},
+		Logger:                logging.Nop(),
 		dialContext: func(context.Context, string, string) (net.Conn, error) {
 			dials++
 			attempt := dials
@@ -142,7 +143,7 @@ func TestRunSenderRetriesResolverErrorsUntilAddress(t *testing.T) {
 		ReconnectMinDelay:     10 * time.Millisecond,
 		ReconnectMaxDelay:     80 * time.Millisecond,
 		ReconnectHealthyAfter: time.Second,
-		Logf:                  func(string, ...any) {},
+		Logger:                logging.Nop(),
 		dialContext: func(context.Context, string, string) (net.Conn, error) {
 			dials++
 			return &scriptedConn{
@@ -189,7 +190,7 @@ func TestRunSenderContextCancelStopsPromptly(t *testing.T) {
 		ReconnectMinDelay:     10 * time.Millisecond,
 		ReconnectMaxDelay:     80 * time.Millisecond,
 		ReconnectHealthyAfter: time.Second,
-		Logf:                  func(string, ...any) {},
+		Logger:                logging.Nop(),
 		sleep: func(context.Context, time.Duration) bool {
 			t.Fatal("RunSender slept after context cancellation")
 			return false

@@ -6,11 +6,11 @@ import (
 	"errors"
 	"net"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/logging"
 	"remote-au/internal/protocol"
 )
 
@@ -188,19 +188,11 @@ func TestUDPReceiverIdleCleanupRunsDuringContinuousUnknownTraffic(t *testing.T) 
 
 func TestReceiverRunBindsUDPToTCPSelectedPort(t *testing.T) {
 	addr := reserveTestTCPAddr(t)
-	started := make(chan struct{})
-	var startedOnce sync.Once
 
 	receiver, err := NewReceiver(ReceiverOptions{
 		Format:       testReceiverFormat(),
 		BufferFrames: 4,
-		Logf: func(format string, args ...any) {
-			if format == "listening on udp %s" {
-				startedOnce.Do(func() {
-					close(started)
-				})
-			}
-		},
+		Logger:       logging.Nop(),
 	})
 	if err != nil {
 		t.Fatalf("NewReceiver: %v", err)
@@ -223,18 +215,6 @@ func TestReceiverRunBindsUDPToTCPSelectedPort(t *testing.T) {
 		}
 	}()
 
-	select {
-	case <-started:
-	case err := <-done:
-		skipIfNetworkPermissionDenied(t, err)
-		if err != nil {
-			t.Fatalf("Receiver.Run exited during startup: %v", err)
-		}
-		t.Fatal("Receiver.Run exited during startup")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for Receiver.Run UDP listener")
-	}
-
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		t.Fatalf("ResolveUDPAddr: %v", err)
@@ -242,10 +222,37 @@ func TestReceiverRunBindsUDPToTCPSelectedPort(t *testing.T) {
 	client := dialTestUDP(t, udpAddr)
 	defer client.Close()
 
-	sendTestUDPHello(t, client, "run-udp")
-	waitForCondition(t, time.Second, "udp stream through Receiver.Run", func() bool {
-		return receiver.Stats().ActiveStreams == 1
-	})
+	helloPacket := testUDPHelloPacket(t, "run-udp")
+	deadline := time.Now().Add(time.Second)
+	var lastWriteErr error
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			skipIfNetworkPermissionDenied(t, err)
+			if err != nil {
+				t.Fatalf("Receiver.Run exited during startup: %v", err)
+			}
+			t.Fatal("Receiver.Run exited during startup")
+		default:
+		}
+		if receiver.Stats().ActiveStreams == 1 {
+			return
+		}
+		if _, err := client.Write(helloPacket); err != nil {
+			skipIfNetworkPermissionDenied(t, err)
+			lastWriteErr = err
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if receiver.Stats().ActiveStreams == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastWriteErr != nil {
+		t.Fatalf("timed out waiting for udp stream through Receiver.Run; last udp write error: %v", lastWriteErr)
+	}
+	t.Fatalf("timed out waiting for udp stream through Receiver.Run")
 }
 
 func startTestUDPReceiver(t *testing.T, opts ReceiverOptions) (*Receiver, *net.UDPAddr, func()) {
@@ -256,7 +263,7 @@ func startTestUDPReceiver(t *testing.T, opts ReceiverOptions) (*Receiver, *net.U
 	if opts.BufferFrames == 0 {
 		opts.BufferFrames = 4
 	}
-	opts.Logf = func(string, ...any) {}
+	opts.Logger = logging.Nop()
 	receiver, err := NewReceiver(opts)
 	if err != nil {
 		t.Fatalf("NewReceiver: %v", err)
@@ -334,6 +341,14 @@ func skipIfNetworkPermissionDenied(t *testing.T, err error) {
 
 func sendTestUDPHello(t *testing.T, conn *net.UDPConn, name string) {
 	t.Helper()
+	packet := testUDPHelloPacket(t, name)
+	if _, err := conn.Write(packet); err != nil {
+		t.Fatalf("write udp hello: %v", err)
+	}
+}
+
+func testUDPHelloPacket(t *testing.T, name string) []byte {
+	t.Helper()
 	hs := protocol.Handshake{
 		Version:      protocol.Version1,
 		SampleRate:   uint32(testReceiverFormat().Rate),
@@ -346,9 +361,7 @@ func sendTestUDPHello(t *testing.T, conn *net.UDPConn, name string) {
 	if err != nil {
 		t.Fatalf("AppendUDPHello: %v", err)
 	}
-	if _, err := conn.Write(packet); err != nil {
-		t.Fatalf("write udp hello: %v", err)
-	}
+	return packet
 }
 
 func sendTestUDPAudio(t *testing.T, conn *net.UDPConn, seq, captureFrame uint64, payload []byte) {

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net"
 	"net/netip"
 	"reflect"
@@ -10,9 +12,125 @@ import (
 	"testing"
 	"time"
 
+	"remote-au/internal/audio"
 	"remote-au/internal/discovery"
+	"remote-au/internal/logging"
 	"remote-au/internal/transport"
 )
+
+func TestVersionFlagReturnsBeforeAudioFormatValidation(t *testing.T) {
+	oldVersion := version
+	version = "1.2.3-test"
+	t.Cleanup(func() {
+		version = oldVersion
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--rate", "0", "--version"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run --version: %v", err)
+	}
+	if got := stdout.String(); got != "1.2.3-test\n" {
+		t.Fatalf("stdout=%q, want version", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr=%q, want empty", stderr.String())
+	}
+}
+
+func TestVersionSubcommandReturnsBeforeAudioFormatValidation(t *testing.T) {
+	oldVersion := version
+	version = "1.2.4-test"
+	t.Cleanup(func() {
+		version = oldVersion
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--rate", "0", "version"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run version: %v", err)
+	}
+	if got := stdout.String(); got != "1.2.4-test\n" {
+		t.Fatalf("stdout=%q, want version", got)
+	}
+}
+
+func TestDevicesJSONUsesMachineCleanStdout(t *testing.T) {
+	oldEncode := encodeDevicesJSON
+	encodeDevicesJSON = func(w io.Writer, verbose bool, logger logging.Logger) error {
+		if !verbose {
+			t.Fatal("verbose=false, want true from global --verbose")
+		}
+		if logger == nil {
+			t.Fatal("logger=nil, want logger")
+		}
+		return audio.EncodeDeviceListsJSON(w, audio.DeviceLists{
+			Playback:     []audio.DeviceInfo{{Index: 0, Name: "Output", ID: "play-0"}},
+			Capture:      []audio.DeviceInfo{{Index: 1, Name: "Mic", ID: "cap-1"}},
+			LoopbackNote: "note",
+		})
+	}
+	t.Cleanup(func() {
+		encodeDevicesJSON = oldEncode
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--verbose", "devices", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run devices --json: %v", err)
+	}
+
+	var decoded audio.DeviceLists
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if decoded.Playback[0].Name != "Output" || decoded.Capture[0].Name != "Mic" {
+		t.Fatalf("decoded=%+v, want fixture devices", decoded)
+	}
+	if strings.Contains(stdout.String(), "format:") || strings.Contains(stdout.String(), "Playback devices:") {
+		t.Fatalf("stdout includes human text: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "format:") {
+		t.Fatalf("stderr=%q, want verbose format diagnostic", stderr.String())
+	}
+}
+
+func TestLogLevelDebugEnablesVerboseDiagnostics(t *testing.T) {
+	oldEncode := encodeDevicesJSON
+	encodeDevicesJSON = func(w io.Writer, verbose bool, logger logging.Logger) error {
+		if !verbose {
+			t.Fatal("verbose=false, want true from --log-level debug")
+		}
+		return audio.EncodeDeviceListsJSON(w, audio.DeviceLists{})
+	}
+	t.Cleanup(func() {
+		encodeDevicesJSON = oldEncode
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--log-level", "debug", "devices", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run devices --json: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "format:") {
+		t.Fatalf("stderr=%q, want debug format diagnostic", stderr.String())
+	}
+}
+
+func TestNegativeDeviceSelectorRequestsAutoSelection(t *testing.T) {
+	tests := []struct {
+		selector string
+		want     bool
+	}{
+		{selector: "", want: false},
+		{selector: "-1", want: false},
+		{selector: " -42 ", want: false},
+		{selector: "0", want: true},
+		{selector: "usb", want: true},
+	}
+
+	for _, tt := range tests {
+		if got := deviceSelectorRequestsSelection(tt.selector); got != tt.want {
+			t.Fatalf("deviceSelectorRequestsSelection(%q)=%v, want %v", tt.selector, got, tt.want)
+		}
+	}
+}
 
 func TestChooseDiscoveredPeerRequiresPeerNameForSingleInstance(t *testing.T) {
 	var out bytes.Buffer
@@ -205,7 +323,7 @@ func TestDiscoveredPeerResolverRetriesSelectionErrors(t *testing.T) {
 	})
 
 	var calls int
-	discoveryFindPorts = func(context.Context, []int, time.Duration, string, func(string, ...any)) ([]discovery.Peer, error) {
+	discoveryFindPorts = func(context.Context, []int, time.Duration, string, logging.Logger) ([]discovery.Peer, error) {
 		calls++
 		if calls == 1 {
 			return nil, nil
@@ -214,7 +332,7 @@ func TestDiscoveredPeerResolverRetriesSelectionErrors(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	resolve := newDiscoveredPeerResolver(&out, []int{47001}, time.Millisecond, "sender", "", false)
+	resolve := newDiscoveredPeerResolver(&out, []int{47001}, time.Millisecond, "sender", "", logging.Nop())
 	addr, err := resolve(context.Background())
 	if err == nil {
 		t.Fatal("discovery resolver returned nil error with no peers")

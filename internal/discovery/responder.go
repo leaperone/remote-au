@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"remote-au/internal/logging"
 )
 
 const (
@@ -17,15 +19,15 @@ const (
 	announceReplyBurst    = 16
 )
 
-func RunResponder(ctx context.Context, discoveryPort int, audioPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
+func RunResponder(ctx context.Context, discoveryPort int, audioPort int, name string, advertisedAddr netip.Addr, logger logging.Logger) error {
 	conn, _, err := ListenFirst([]int{discoveryPort})
 	if err != nil {
 		return err
 	}
-	return RunResponderOnConn(ctx, conn, audioPort, name, advertisedAddr, logf)
+	return RunResponderOnConn(ctx, conn, audioPort, name, advertisedAddr, logger)
 }
 
-func RunResponderOnConn(ctx context.Context, conn *net.UDPConn, audioPort int, name string, advertisedAddr netip.Addr, logf func(format string, args ...any)) error {
+func RunResponderOnConn(ctx context.Context, conn *net.UDPConn, audioPort int, name string, advertisedAddr netip.Addr, logger logging.Logger) error {
 	if conn == nil {
 		return errors.New("discovery responder conn is nil")
 	}
@@ -35,8 +37,8 @@ func RunResponderOnConn(ctx context.Context, conn *net.UDPConn, audioPort int, n
 	var closeOnce sync.Once
 	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
 	defer closeConn()
-	if logf == nil {
-		logf = func(string, ...any) {}
+	if logger == nil {
+		logger = logging.Nop()
 	}
 
 	instanceID, err := newInstanceID()
@@ -65,10 +67,10 @@ func RunResponderOnConn(ctx context.Context, conn *net.UDPConn, audioPort int, n
 		<-watcherDone
 	}()
 
-	logf("discovery listening on %s, replying with audio port %d as %q", conn.LocalAddr(), audioPort, name)
+	logger.Infof("discovery listening on %s, replying with audio port %d as %q", conn.LocalAddr(), audioPort, name)
 
 	limiter := newReplyRateLimiter(time.Now())
-	return runResponderLoop(runCtx, conn, announce, &limiter, logf)
+	return runResponderLoop(runCtx, conn, announce, &limiter, logger)
 }
 
 func newInstanceID() (InstanceID, error) {
@@ -79,9 +81,9 @@ func newInstanceID() (InstanceID, error) {
 	return id, nil
 }
 
-func runResponderLoop(ctx context.Context, conn *net.UDPConn, announce []byte, limiter *replyRateLimiter, logf func(format string, args ...any)) error {
-	if logf == nil {
-		logf = func(string, ...any) {}
+func runResponderLoop(ctx context.Context, conn *net.UDPConn, announce []byte, limiter *replyRateLimiter, logger logging.Logger) error {
+	if logger == nil {
+		logger = logging.Nop()
 	}
 	if limiter == nil {
 		newLimiter := newReplyRateLimiter(time.Now())
@@ -113,7 +115,7 @@ func runResponderLoop(ctx context.Context, conn *net.UDPConn, announce []byte, l
 
 		msg, err := Decode(buf[:n])
 		if err != nil {
-			logf("ignoring malformed discovery packet from %s: %v", src, err)
+			logger.Debugf("ignoring malformed discovery packet from %s: %v", src, err)
 			continue
 		}
 		if msg.Type != TypeQuery {
@@ -123,7 +125,7 @@ func runResponderLoop(ctx context.Context, conn *net.UDPConn, announce []byte, l
 			continue
 		}
 		if _, err := conn.WriteToUDPAddrPort(announce, src); err != nil {
-			logf("discovery announce reply to %s failed: %v", src, err)
+			logger.Warnf("discovery announce reply to %s failed: %v", src, err)
 		}
 	}
 }

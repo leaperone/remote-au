@@ -1,16 +1,19 @@
 package audio
 
 import (
-	"log"
-
 	"github.com/gen2brain/malgo"
+
+	"remote-au/internal/logging"
 )
 
-func initContext(verbose bool) (*malgo.AllocatedContext, error) {
+func initContext(debug bool, logger logging.Logger) (*malgo.AllocatedContext, error) {
+	if logger == nil {
+		logger = logging.Nop()
+	}
 	var logProc malgo.LogProc
-	if verbose {
+	if debug {
 		logProc = func(message string) {
-			log.Printf("malgo: %s", message)
+			logger.Debugf("malgo: %s", message)
 		}
 	}
 	return malgo.InitContext(nil, malgo.ContextConfig{}, logProc)

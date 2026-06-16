@@ -112,9 +112,16 @@ remote-au send --to 192.168.1.20:47000
 
 ## Commands
 
+### `remote-au version`
+Print the CLI version and exit. `remote-au --version` is equivalent and works
+without initializing audio.
+
 ### `remote-au devices`
 List the local playback and capture devices with their indices, so you can pass
-`--device <index>` to `recv`/`send`. Also notes per-platform loopback support.
+`--device <index|name>` to `recv`/`send`. Also notes per-platform loopback support.
+
+Use `remote-au devices --json` for machine-readable output. JSON is written to
+stdout; diagnostics are written to stderr.
 
 ### `remote-au selftest`
 Capture the local microphone and play it straight back through the local speakers —
@@ -127,7 +134,7 @@ and plays the result.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--addr` | `:47000` | Audio listen address (TCP + UDP). |
-| `--device` | auto | Playback device index (see `devices`). |
+| `--device` | auto | Playback device index or case-insensitive name substring (see `devices`). |
 | `--discovery-port` | `0` | UDP discovery port. `0` auto-selects the first available of `47001`, `48001`, `49001`; explicit `N` forces one port. |
 | `--name` | hostname | Name advertised to senders during discovery. |
 | `--no-discovery` | off | Disable the LAN discovery responder. |
@@ -141,7 +148,7 @@ Captures audio and streams it to a receiver.
 | `--peer` | *(none)* | Require a discovered receiver with this name (safe disambiguator). |
 | `--source` | `mic` | Capture source: `mic` or `loopback` (system audio). |
 | `--transport` | `udp` | Audio transport: `udp` (low latency) or `tcp` (reliable). |
-| `--device` | auto | Capture device index (see `devices`). |
+| `--device` | auto | Capture device index or case-insensitive name substring (see `devices`). For `--source loopback` on Windows, this selects a playback endpoint. |
 | `--discover-timeout` | `1.5s` | How long to wait for discovery replies. |
 | `--discovery-port` | `0` | UDP discovery port. `0` queries `47001`, `48001`, `49001`; explicit `N` forces one port. |
 | `--name` | hostname | Name this sender uses during discovery. |
@@ -155,10 +162,16 @@ Apply to any subcommand, placed **before** it (e.g. `remote-au --verbose recv`):
 | `--rate` | `48000` | Sample rate (Hz). |
 | `--channels` | `2` | Channel count. |
 | `--frame-ms` | `10` | PCM packet duration (ms). |
-| `--verbose` | off | Verbose audio-backend + per-stream stats logging. |
+| `--verbose` | off | Compatibility alias for debug diagnostics and verbose audio-backend/per-stream stats logging. |
+| `--version` | off | Print the CLI version and exit. |
+| `--log-level` | `info` | Diagnostic log level: `debug`, `info`, `warn`, or `error`. |
+| `--log-format` | `text` | Diagnostic log format: `text` or `json`. |
 
 All endpoints must agree on `rate` / `channels`; the receiver rejects senders whose
 format does not match.
+
+Interactive status lines stay on stdout. Diagnostic logs use stderr, so commands
+such as `remote-au devices --json` can be consumed by scripts without filtering.
 
 ---
 
@@ -201,6 +214,34 @@ concern is **capturing *system* audio** on the sender:
 | **macOS** | ✅ | Needs a virtual device such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) |
 
 Playback (what the receiver does) works everywhere with no extra setup.
+
+## Troubleshooting
+
+### Discovery finds nothing
+
+Firewalls and broadcast-isolated VLANs can block UDP discovery. Start the receiver
+with `remote-au recv`, note its address, then connect directly:
+
+```sh
+remote-au send --to 192.168.1.20:47000
+```
+
+Open the audio port for both TCP and UDP, plus the UDP discovery ports in use
+(`47001`, `48001`, `49001` by default, or your explicit `--discovery-port`).
+
+### No audio or rejected streams
+
+Run `remote-au devices` to confirm the expected playback/capture endpoints exist,
+and try `remote-au selftest` on the sender. All endpoints must use the same
+`--rate`, `--channels`, and `--frame-ms`; a receiver rejects streams with a
+different format.
+
+### System audio capture
+
+Windows uses native WASAPI loopback with `remote-au send --source loopback`. On
+macOS, install a virtual capture device such as BlackHole and choose it with
+`--device`. On Linux, choose a PulseAudio/PipeWire monitor source from
+`remote-au devices`.
 
 ## Audio format
 
@@ -271,4 +312,5 @@ that Release.
 
 ## License
 
-[MIT](LICENSE) © leaperone
+[AGPL-3.0-or-later](LICENSE) © leaperone. The CLI is copyleft so networked
+improvements to this open component stay available to its users.

@@ -27,7 +27,7 @@
   "bugs": {
     "url": "https://github.com/leaperone/remote-au/issues"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "author": "leaperone",
   "keywords": [
     "audio",

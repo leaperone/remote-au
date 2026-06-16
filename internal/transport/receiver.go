@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"remote-au/internal/audio"
+	"remote-au/internal/logging"
 	"remote-au/internal/mixer"
 	"remote-au/internal/protocol"
 	"remote-au/internal/stats"
@@ -39,7 +40,7 @@ type ReceiverOptions struct {
 	BufferFrames int
 	ReadTimeout  time.Duration
 	MaxStreams   int
-	Logf         func(format string, args ...any)
+	Logger       logging.Logger
 }
 
 type Receiver struct {
@@ -48,7 +49,7 @@ type Receiver struct {
 	maxStreams       int
 	readTimeout      time.Duration
 	handshakeTimeout time.Duration
-	logf             func(format string, args ...any)
+	logger           logging.Logger
 	gaps             atomic.Uint64
 	staleFrames      atomic.Uint64
 	nextStreamID     atomic.Uint64
@@ -71,8 +72,8 @@ func NewReceiver(opts ReceiverOptions) (*Receiver, error) {
 	if opts.MaxStreams <= 0 {
 		opts.MaxStreams = defaultMaxStreams
 	}
-	if opts.Logf == nil {
-		opts.Logf = func(string, ...any) {}
+	if opts.Logger == nil {
+		opts.Logger = logging.Nop()
 	}
 
 	mix, err := mixer.New(mixer.Options{
@@ -89,7 +90,7 @@ func NewReceiver(opts ReceiverOptions) (*Receiver, error) {
 		maxStreams:       opts.MaxStreams,
 		readTimeout:      opts.ReadTimeout,
 		handshakeTimeout: defaultHandshakeTimeout,
-		logf:             opts.Logf,
+		logger:           opts.Logger,
 		activeStreams:    make(map[streamKey]string),
 		conns:            make(map[net.Conn]struct{}),
 	}, nil
@@ -139,9 +140,9 @@ func (r *Receiver) RunListeners(ctx context.Context, tcpLn net.Listener, udpConn
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	r.logf("listening on tcp %s", tcpLn.Addr())
+	r.logger.Infof("listening on tcp %s", tcpLn.Addr())
 	if udpConn != nil {
-		r.logf("listening on udp %s", udpConn.LocalAddr())
+		r.logger.Infof("listening on udp %s", udpConn.LocalAddr())
 	}
 
 	errCh := make(chan error, 2)
@@ -218,7 +219,7 @@ func (r *Receiver) runTCPAcceptLoop(ctx context.Context, ln net.Listener, pendin
 		select {
 		case pendingHandshakes <- struct{}{}:
 		default:
-			r.logf("too many pending handshakes, rejecting %s", conn.RemoteAddr())
+			r.logger.Warnf("too many pending handshakes, rejecting %s", conn.RemoteAddr())
 			r.untrackConn(conn)
 			_ = conn.Close()
 			continue
@@ -270,30 +271,30 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 		r.untrackConn(conn)
 		_ = conn.Close()
 		if active {
-			r.logf("connection from %s closed", remote)
+			r.logger.Infof("connection from %s closed", remote)
 		}
 	}()
 
 	reader := bufio.NewReaderSize(conn, 32*1024)
 	if err := setReadDeadline(conn, r.handshakeTimeout); err != nil {
-		r.logf("connection setup failed from %s: %v", remote, err)
+		r.logger.Warnf("connection setup failed from %s: %v", remote, err)
 		return
 	}
 
 	hs, err := protocol.ReadHandshake(reader)
 	if err != nil {
-		r.logf("handshake failed from %s: %v", remote, err)
+		r.logger.Warnf("handshake failed from %s: %v", remote, err)
 		return
 	}
 	if err := r.validateTCPHandshake(hs); err != nil {
-		r.logf("rejecting %s: %v", remote, err)
+		r.logger.Warnf("rejecting %s: %v", remote, err)
 		return
 	}
 	var ok bool
 	key = r.tcpStreamKey(remote)
 	stream, ok = r.registerStream(key, hs.Name, remote)
 	if !ok {
-		r.logf("rejecting %s: maximum active streams reached (%d)", remote, r.maxStreams)
+		r.logger.Warnf("rejecting %s: maximum active streams reached (%d)", remote, r.maxStreams)
 		return
 	}
 	active = true
@@ -304,7 +305,7 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 	if name == "" {
 		name = "(unnamed)"
 	}
-	r.logf("stream started from %s: %s, %d Hz, %d channel(s), %d-frame packets", remote, name, hs.SampleRate, hs.Channels, hs.FrameSamples)
+	r.logger.Infof("stream started from %s: %s, %d Hz, %d channel(s), %d-frame packets", remote, name, hs.SampleRate, hs.Channels, hs.FrameSamples)
 
 	payloadBuf := make([]byte, 0, r.format.PacketBytes())
 	tracker := frameTracker{}
@@ -313,14 +314,14 @@ func (r *Receiver) handleConnection(ctx context.Context, conn net.Conn, releaseP
 			return
 		}
 		if err := setReadDeadline(conn, r.readTimeout); err != nil {
-			r.logf("read deadline failed: %v", err)
+			r.logger.Warnf("read deadline failed: %v", err)
 			return
 		}
 
 		var frame protocol.Frame
 		frame, payloadBuf, err = protocol.ReadFrame(reader, hs, payloadBuf)
 		if err != nil {
-			r.logf("read frame failed from %s: %v", remote, err)
+			r.logger.Warnf("read frame failed from %s: %v", remote, err)
 			return
 		}
 		if !r.acceptFrame(remote, &tracker, frame, int(hs.FrameSamples)) {
@@ -371,7 +372,7 @@ func (r *Receiver) runUDPReceiveLoop(ctx context.Context, conn *net.UDPConn) err
 
 		datagram, err := protocol.DecodeUDPDatagram(buf[:n])
 		if err != nil {
-			r.logf("dropping udp datagram from %s: %v", src, err)
+			r.logger.Debugf("dropping udp datagram from %s: %v", src, err)
 			continue
 		}
 
@@ -381,7 +382,7 @@ func (r *Receiver) runUDPReceiveLoop(ctx context.Context, conn *net.UDPConn) err
 		case protocol.DatagramTypeAudio:
 			r.handleUDPAudio(sources, src, datagram.Frame, now)
 		default:
-			r.logf("dropping udp datagram from %s: unsupported type %d", src, datagram.Type)
+			r.logger.Debugf("dropping udp datagram from %s: unsupported type %d", src, datagram.Type)
 		}
 	}
 }
@@ -389,7 +390,7 @@ func (r *Receiver) runUDPReceiveLoop(ctx context.Context, conn *net.UDPConn) err
 func (r *Receiver) handleUDPHello(sources map[netip.AddrPort]*udpSourceState, src netip.AddrPort, hs protocol.Handshake, now time.Time) {
 	remote := src.String()
 	if err := r.validateFormat(hs); err != nil {
-		r.logf("rejecting udp %s: %v", remote, err)
+		r.logger.Warnf("rejecting udp %s: %v", remote, err)
 		return
 	}
 
@@ -401,7 +402,7 @@ func (r *Receiver) handleUDPHello(sources map[netip.AddrPort]*udpSourceState, sr
 	key := r.udpStreamKey(src)
 	stream, ok := r.registerStream(key, hs.Name, remote)
 	if !ok {
-		r.logf("rejecting udp %s: maximum active streams reached (%d)", remote, r.maxStreams)
+		r.logger.Warnf("rejecting udp %s: maximum active streams reached (%d)", remote, r.maxStreams)
 		return
 	}
 	sources[src] = &udpSourceState{
@@ -413,20 +414,20 @@ func (r *Receiver) handleUDPHello(sources map[netip.AddrPort]*udpSourceState, sr
 	if name == "" {
 		name = "(unnamed)"
 	}
-	r.logf("udp stream started from %s: %s, %d Hz, %d channel(s)", remote, name, hs.SampleRate, hs.Channels)
+	r.logger.Infof("udp stream started from %s: %s, %d Hz, %d channel(s)", remote, name, hs.SampleRate, hs.Channels)
 }
 
 func (r *Receiver) handleUDPAudio(sources map[netip.AddrPort]*udpSourceState, src netip.AddrPort, frame protocol.Frame, now time.Time) {
 	state := sources[src]
 	if state == nil {
-		r.logf("dropping udp audio from unknown source %s", src)
+		r.logger.Debugf("dropping udp audio from unknown source %s", src)
 		return
 	}
 
 	payloadLen := len(frame.Payload)
 	bytesPerFrame := r.format.BytesPerFrame()
 	if bytesPerFrame <= 0 || payloadLen%bytesPerFrame != 0 {
-		r.logf("dropping udp audio from %s: payload length %d is not frame-aligned to %d byte frame(s)", src, payloadLen, bytesPerFrame)
+		r.logger.Warnf("dropping udp audio from %s: payload length %d is not frame-aligned to %d byte frame(s)", src, payloadLen, bytesPerFrame)
 		return
 	}
 
@@ -447,7 +448,7 @@ func (r *Receiver) cleanupIdleUDPSources(sources map[netip.AddrPort]*udpSourceSt
 		if now.Sub(state.lastSeen) <= udpIdleTimeout {
 			continue
 		}
-		r.logf("udp stream from %s timed out", src)
+		r.logger.Warnf("udp stream from %s timed out", src)
 		r.unregisterStream(r.udpStreamKey(src), state.stream.ID())
 		delete(sources, src)
 	}
@@ -479,18 +480,18 @@ func (r *Receiver) acceptTrackedFrame(remote string, tracker *frameTracker, fram
 	result := tracker.Accept(frame.Seq, frame.CaptureFrame, packetFrames)
 	if result.Stale {
 		r.staleFrames.Add(1)
-		r.logf("dropping stale %sframe from %s: seq=%d, expected=%d", logPrefix, remote, frame.Seq, result.ExpectedSeq)
+		r.logger.Warnf("dropping stale %sframe from %s: seq=%d, expected=%d", logPrefix, remote, frame.Seq, result.ExpectedSeq)
 		return false, 0
 	}
 	if result.MissingPackets > 0 {
 		r.gaps.Add(result.MissingPackets)
-		r.logf("%ssequence gap from %s: missing %d packet(s), expected seq=%d, got seq=%d", logPrefix, remote, result.MissingPackets, result.ExpectedSeq, frame.Seq)
+		r.logger.Warnf("%ssequence gap from %s: missing %d packet(s), expected seq=%d, got seq=%d", logPrefix, remote, result.MissingPackets, result.ExpectedSeq, frame.Seq)
 	}
 
 	if result.CaptureGapFrames > 0 {
-		r.logf("%scapture frame gap from %s: missing %d frame(s), expected captureFrame=%d, got captureFrame=%d", logPrefix, remote, result.CaptureGapFrames, result.ExpectedCaptureFrame, frame.CaptureFrame)
+		r.logger.Warnf("%scapture frame gap from %s: missing %d frame(s), expected captureFrame=%d, got captureFrame=%d", logPrefix, remote, result.CaptureGapFrames, result.ExpectedCaptureFrame, frame.CaptureFrame)
 	} else if result.CaptureMovedBackward {
-		r.logf("%scapture frame moved backward from %s: expected captureFrame=%d, got captureFrame=%d", logPrefix, remote, result.ExpectedCaptureFrame, frame.CaptureFrame)
+		r.logger.Warnf("%scapture frame moved backward from %s: expected captureFrame=%d, got captureFrame=%d", logPrefix, remote, result.ExpectedCaptureFrame, frame.CaptureFrame)
 	}
 
 	return true, result.GapFrames
@@ -627,7 +628,7 @@ func (r *Receiver) registerStream(key streamKey, name, remote string) (*mixer.St
 	id := string(key)
 	stream, err := r.mixer.AddStream(id, name, remote)
 	if err != nil {
-		r.logf("register stream failed from %s: %v", remote, err)
+		r.logger.Errorf("register stream failed from %s: %v", remote, err)
 		return nil, false
 	}
 	r.activeStreams[key] = id
