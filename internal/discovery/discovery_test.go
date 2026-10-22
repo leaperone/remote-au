@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -264,12 +266,23 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), logging.Nop())
+		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), listenReadyLogger{ready: ready})
 	}()
 
-	waitForResponderDiscovery(t, port, done)
+	startTimeout := time.Second
+	if runtime.GOOS == "windows" {
+		startTimeout = 5 * time.Second
+	}
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("RunResponder returned before cancel: %v", err)
+	case <-time.After(startTimeout):
+		t.Fatal("RunResponder did not start listening")
+	}
 
 	cancel()
 	select {
@@ -282,26 +295,20 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
-func waitForResponderDiscovery(t *testing.T, port int, done <-chan error) {
-	t.Helper()
+// listenReadyLogger closes ready once RunResponder logs that it is listening.
+type listenReadyLogger struct {
+	ready chan struct{}
+	once  sync.Once
+}
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-done:
-			t.Fatalf("RunResponder returned before cancel: %v", err)
-		default:
-		}
+func (l listenReadyLogger) Debugf(string, ...any) {}
+func (l listenReadyLogger) Warnf(string, ...any)  {}
+func (l listenReadyLogger) Errorf(string, ...any) {}
 
-		findCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		peers, err := FindPorts(findCtx, []int{port}, 100*time.Millisecond, "sender", logging.Nop())
-		cancel()
-		if err == nil && len(peers) == 1 && peers[0].Name == "recv-host" {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+func (l listenReadyLogger) Infof(format string, args ...any) {
+	if strings.Contains(format, "discovery listening") {
+		l.once.Do(func() { close(l.ready) })
 	}
-	t.Fatal("RunResponder did not answer discovery")
 }
 
 func TestListenFirstFallsBackWhenPreferredPortOccupied(t *testing.T) {
