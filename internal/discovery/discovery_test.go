@@ -269,7 +269,7 @@ func TestRunResponderReturnsOnContextCancel(t *testing.T) {
 	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), listenReadyLogger{ready: ready})
+		done <- RunResponder(ctx, port, 47000, "recv-host", netip.AddrFrom4([4]byte{}), &listenReadyLogger{ready: ready})
 	}()
 
 	startTimeout := time.Second
@@ -301,11 +301,11 @@ type listenReadyLogger struct {
 	once  sync.Once
 }
 
-func (l listenReadyLogger) Debugf(string, ...any) {}
-func (l listenReadyLogger) Warnf(string, ...any)  {}
-func (l listenReadyLogger) Errorf(string, ...any) {}
+func (l *listenReadyLogger) Debugf(string, ...any) {}
+func (l *listenReadyLogger) Warnf(string, ...any)  {}
+func (l *listenReadyLogger) Errorf(string, ...any) {}
 
-func (l listenReadyLogger) Infof(format string, args ...any) {
+func (l *listenReadyLogger) Infof(format string, args ...any) {
 	if strings.Contains(format, "discovery listening") {
 		l.once.Do(func() { close(l.ready) })
 	}
