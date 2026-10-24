@@ -11,3 +11,6 @@ node_modules/
 # Rust build output (local builds use external CARGO_TARGET_DIR)
 /target/
 /.worktrees/
+
+__pycache__/
+*.py[cod]

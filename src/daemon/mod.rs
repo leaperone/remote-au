@@ -223,6 +223,7 @@ pub async fn run_sender(opts: SenderOptions) -> Result<(), String> {
         let mut next_verify = Instant::now() + Duration::from_secs(2);
         let mut verify_inflight = false;
         let mut misses = 0u32;
+        let mut last_feedback = Instant::now();
         let mut last_train = Instant::now();
         let mut reprobe = false;
         begin_train(
@@ -310,6 +311,7 @@ pub async fn run_sender(opts: SenderOptions) -> Result<(), String> {
                         Ok((len, _)) if (1..=MAX_DATAGRAM).contains(&len) => {
                             if engine.handle_feedback(&buf[..len], mono_us()) {
                                 let current = engine.snapshot();
+                                if current.rtt_us < 3_000_000 { last_feedback=Instant::now(); }
                                 if current.loss >= 0.10 && !probing && last_train.elapsed() >= Duration::from_secs(10) {
                                     reprobe = true;
                                 }
@@ -345,8 +347,13 @@ pub async fn run_sender(opts: SenderOptions) -> Result<(), String> {
                     } else {
                         misses += 1;
                         if misses >= 3 {
-                            tracing::info!("receiver disappeared; discovering again");
-                            break;
+                            if last_feedback.elapsed() < Duration::from_secs(3) {
+                                misses = 0;
+                                tracing::debug!("discovery unavailable; authenticated audio feedback is healthy");
+                            } else {
+                                tracing::info!("receiver disappeared; discovering again");
+                                break;
+                            }
                         }
                     }
                 }

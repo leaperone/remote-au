@@ -21,10 +21,10 @@ class Link:
     def __init__(self, upstream, seed=42):
         self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.front.bind(("127.0.0.1", 0))
-        self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.back.bind(("127.0.0.1", 0))
         self.upstream = upstream
-        self.client = None
+        self.clients = {}
+        self.backends = {}
+        self.drop_discovery = False
         self.delay = self.jitter = self.loss = 0
         self.capacity_bps = 0
         self.next_free = {"up":0.0,"down":0.0}
@@ -42,18 +42,30 @@ class Link:
         pending = []
         ordinal = 0
         while self.running:
-            ready, _, _ = select.select([self.front, self.back], [], [], .002)
+            ready, _, _ = select.select([self.front, *self.backends], [], [], .002)
             for sock in ready:
                 data, peer = sock.recvfrom(65535)
                 if sock is self.front:
-                    self.client = peer
-                    dest_sock, dest = self.back, self.upstream
+                    if peer not in self.clients:
+                        if len(self.clients) >= 128:
+                            self.count["dropped"] += 1
+                            continue
+                        back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        back.bind(("127.0.0.1",0))
+                        self.clients[peer] = back
+                        self.backends[back] = [peer,time.monotonic()]
+                    back = self.clients[peer]
+                    self.backends[back][1] = time.monotonic()
+                    dest_sock, dest = back, self.upstream
                     direction = "up"
                 else:
-                    if peer != self.upstream or self.client is None:
+                    if peer != self.upstream:
                         continue
-                    dest_sock, dest = self.front, self.client
+                    dest_sock, dest = self.front, self.backends[sock][0]
                     direction = "down"
+                if self.drop_discovery and data.startswith(b"RAUD"):
+                    self.count["dropped"] += 1
+                    continue
                 if self.rng.random() < self.loss or len(pending) >= 4096:
                     self.count["dropped"] += 1
                     continue
@@ -70,8 +82,15 @@ class Link:
                 _, _, sock, peer, data = heapq.heappop(pending)
                 sock.sendto(data, peer)
                 self.count["forwarded"] += 1
+            now = time.monotonic()
+            for back, (client,last_seen) in list(self.backends.items()):
+                if now-last_seen>10 and not any(item[2] is back for item in pending):
+                    del self.backends[back]
+                    del self.clients[client]
+                    back.close()
         self.front.close()
-        self.back.close()
+        for back in self.backends:
+            back.close()
 
     def close(self):
         self.running = False
@@ -177,6 +196,9 @@ def main():
         s = spawn(sender, "send", "--to", link.address, "--source", "synth", "--name", "acceptance-synth")
         wait_status(sender, s)
         sample("clean", receiver, sender)
+        link.drop_discovery = True
+        sample("discovery_filtered_audio_continues",receiver,sender)
+        link.drop_discovery = False
         link.delay, link.jitter, link.loss = .018, .012, .03
         sample("impaired_18ms_12msjitter_3pctloss", receiver, sender)
         link.delay = link.jitter = link.loss = 0
