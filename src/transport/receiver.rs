@@ -183,7 +183,7 @@ impl ReceiverEngine {
                 peer.active
                     && match peer.last_feedback {
                         None => true,
-                        Some(at) => now.saturating_duration_since(at) >= Duration::from_millis(500),
+                        Some(at) => now.saturating_duration_since(at) >= Duration::from_millis(400),
                     }
             });
             if !due {

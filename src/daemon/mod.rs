@@ -268,7 +268,7 @@ pub async fn run_sender(opts: SenderOptions) -> Result<(), String> {
                         if probe_done.is_none() {
                             probe_done = Some(Instant::now());
                         }
-                        if probe_done.is_some_and(|at| at.elapsed() >= Duration::from_millis(700)) {
+                        if probe_done.is_some_and(|at| at.elapsed() >= Duration::from_millis(1000)) {
                             let before = engine.profile();
                             engine.note_probe(sent, gradual);
                             gradual = true;

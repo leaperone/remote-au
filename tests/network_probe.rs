@@ -140,3 +140,30 @@ fn probe_echo_pairs_send_ts_for_rtt() {
     assert!(sender.handle_feedback(&fb, now));
     assert!(sender.snapshot().rtt_us > 0 && sender.snapshot().rtt_us < 200_000);
 }
+
+#[test]
+fn feedback_tolerates_submillisecond_tick_jitter() {
+    use remote_au::{
+        mixer::Mixer,
+        protocol::AudioFormat,
+        transport::{ReceiverEngine, SenderEngine},
+    };
+    use std::time::{Duration, Instant};
+    let token = [2; 32];
+    let epoch = [3; 16];
+    let addr = "127.0.0.1:34567".parse().unwrap();
+    let mut source = SenderEngine::new(token, "clock-test".into());
+    source.bind_peer(epoch, addr, "receiver".into(), [4; 16]);
+    let mix = Mixer::new(AudioFormat::canonical());
+    let mut receiver = ReceiverEngine::new(token, epoch);
+    receiver.handle_datagram(&source.hello().unwrap(), addr, &mix);
+    let tick = Instant::now();
+    assert_eq!(receiver.feedback_due(tick, &mix).len(), 1);
+    assert_eq!(
+        receiver
+            .feedback_due(tick + Duration::from_millis(499), &mix)
+            .len(),
+        1,
+        "timer jitter must not defer a whole extra feedback interval"
+    );
+}
