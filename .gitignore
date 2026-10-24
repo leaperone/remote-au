@@ -7,3 +7,7 @@ node_modules/
 /dist/
 /release/
 /vendor/
+
+# Rust build output (local builds use external CARGO_TARGET_DIR)
+/target/
+/.worktrees/

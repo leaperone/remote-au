@@ -1,316 +1,102 @@
 # remote-au
 
-**N→1 LAN audio aggregation, from the command line.**
+将 Windows 的系统播放声音通过局域网传到接音箱的 Mac，支持多台采集端混音。Rust 版以常驻进程运行，发送端离线时接收端持续等待，恢复后自动连接。
 
-Run `remote-au send` on several machines and `remote-au recv` on one. Each sender
-captures its microphone or system audio and streams it over the local network; the
-receiver mixes every stream together and plays the result through its speakers.
+Rust 代码位于 `src/`，Go 代码保留在 `cmd/`、`internal/`，旧版使用说明见 [legacy-go.md](docs/legacy-go.md)。两版协议不同，不互通；现有 npm/Go 发布流程仍发布旧版，本 PR 不触发版本发布。
 
-It is a small, dependency-light reimplementation of the core idea behind
-[AudioRelay](https://audiorelay.net/) — *without* the hardest part (a kernel
-virtual-microphone driver), because the goal here is simply to **play the combined
-audio out of one machine's speakers**, not to expose it as a virtual mic.
+## 构建
 
-```
-   Windows  ──capture──┐
-   (loopback)          │
-                       ▼
-   phone / laptop ──►  UDP / TCP  ──►  receiver ──► mix ──► speakers
-   (mic)               (LAN)           (any OS)
-                       ▲
-   another box ────────┘
-```
-
-- **Roles, not platforms.** `recv` and `send` both run on Windows, Linux and macOS.
-  Any machine can be the receiver; any machine can be a sender.
-- **Zero-config discovery.** `send` finds the receiver on the LAN automatically —
-  no IP addresses to type.
-- **Low latency by default.** Audio travels over UDP (connectionless, no
-  head-of-line blocking); TCP is available as a reliable fallback.
-
----
-
-## Features
-
-- **N→1 aggregation** — many senders → one receiver that mixes and plays back.
-- **Cross-platform** — Windows / Linux / macOS, sender *and* receiver.
-- **Auto-discovery** — UDP broadcast; `send` with no `--to` connects to the
-  receiver it finds on the LAN.
-- **UDP (default) or TCP** — `--transport udp|tcp`. UDP for low latency, TCP for
-  reliability / restrictive networks.
-- **Resilient** — UDP is connectionless: restart the receiver and senders keep
-  emitting and the stream resumes on its own.
-- **Per-stream jitter buffer** — priming, bounded depth, drop-oldest, loss
-  concealment with silence; `--verbose` prints per-stream queue / discarded /
-  underrun / latency stats.
-- **Bounded & defensive** — every network length is validated before allocation;
-  capped concurrent streams; rate-limited discovery replies; idle streams expire.
-
-## Install
-
-From npm (prebuilt binary for your platform is fetched automatically):
+需要 Rust stable。无需额外音频编码库；Windows 使用 WASAPI，Mac 使用 CoreAudio。
 
 ```sh
-npm install -g @leaperone/remote-au
-remote-au --help        # or the short alias:
-rau --help
+cargo test --locked
+cargo build --release --locked
 ```
 
-The CLI is available under two command names — the full `remote-au` and the short
-`rau` — they are identical.
+CI 原生构建 macOS Apple Silicon 和 Windows x64，提供二进制及安装脚本 artifact。Linux 暂未列入 Rust 验收平台。
 
-Supported targets: `darwin-arm64`, `linux-x64`, `linux-arm64`, `win32-x64`. The `@leaperone/remote-au` package is a thin launcher; its install
-script downloads the matching prebuilt binary from the GitHub Release. This needs
-network access at install time and does **not** work with `--ignore-scripts`. If you
-prefer no install scripts, build from source instead (below).
-
-### Build from source
-
-Requirements:
-
-- **Go 1.24+**
-- **A C toolchain** (the audio backend is [miniaudio](https://miniaud.io/) via
-  [`gen2brain/malgo`](https://github.com/gen2brain/malgo), which needs cgo):
-  - **macOS** — Xcode Command Line Tools (`xcode-select --install`).
-  - **Linux** — GCC/Clang and ALSA/PulseAudio/PipeWire dev headers.
-  - **Windows** — MinGW-w64 (`gcc`). MSVC is not supported by cgo.
+在系统盘空间较小时，将以下变量指向有空间的卷，并通过 rustup 的 `--no-modify-path` 安装：
 
 ```sh
-git clone https://github.com/leaperone/remote-au.git
-cd remote-au
-CGO_ENABLED=1 go build -o remote-au ./cmd/remote-au
+export RUSTUP_HOME=/Volumes/CodingSpace/toolchains/remote-au/rustup
+export CARGO_HOME=/Volumes/CodingSpace/toolchains/remote-au/cargo
+export CARGO_TARGET_DIR=/Volumes/CodingSpace/toolchains/remote-au/target
+export PATH="$CARGO_HOME/bin:$PATH"
 ```
 
-Cross-compiling needs a target C compiler and `CGO_ENABLED=1`; building natively on
-each platform is the simplest path.
+## 配对并运行
 
-## Quick start
-
-On the machine that should play the audio (the receiver):
+接收端先创建邀请。邀请文件包含密钥，应只经可信渠道传递，不要提交到 Git 或粘贴到日志中。
 
 ```sh
-remote-au recv
+remote-au --config-dir /path/to/private/config pair
+remote-au --config-dir /path/to/private/config pair --export-file /private/transfer/invitation.json
+remote-au --config-dir /path/to/private/config server
 ```
 
-On each machine that should send audio:
+发送端导入同一份邀请，然后运行：
+
+```powershell
+remote-au.exe pair --import-file .\invitation.json
+remote-au.exe send --source loopback
+```
+
+导入后删除邀请的传输副本。未配对时拒绝推流。共享邀请内的所有节点相互信任；撤销其中一台的权限，需要在服务器 `pair --rotate`，重新给保留的节点配对，并重启各进程。
+
+自动发现优先使用 `192.168.2.0/24`。可保存明确的接收端地址，或恢复自动发现；重启发送进程生效。
 
 ```sh
-remote-au send                    # capture the microphone, auto-find the receiver
-remote-au send --source loopback  # capture system audio (Windows: native WASAPI)
+remote-au select-server 192.168.2.20:47000
+remote-au select-server auto
+remote-au nodes
+remote-au status
+remote-au volume --master 0.7
+remote-au devices --json
+remote-au device --output 1
+remote-au device --capture 0
+remote-au device --reset
 ```
 
-That's it — no IP addresses. Start two senders and the receiver mixes them.
+音量、设备和选服设置按 `--config-dir` 隔离。Windows loopback 的 `--device` 使用播放端点编号。Mac 采集系统声音需已安装的虚拟设备并作为输入选择，默认不安装驱动。
 
-If discovery is blocked on your network (some corporate VLANs isolate broadcast),
-point the sender at the receiver directly:
+接收角色由 `server` 选择，发送角色由 `send` 选择，与平台无关。切换角色前停掉旧进程或启动项，同一配置目录同时运行一个角色。Windows 无扬声器时的端点方案与逐步安装说明见 [Windows 指南](docs/windows.md)。
+
+## 常驻启动与回滚
+
+Mac 用户级 LaunchAgent：将二进制放在 `/Volumes/CodingSpace/remote-au-runtime/bin/remote-au`，先在 `/Volumes/CodingSpace/remote-au-runtime/config` 完成配对，再运行：
 
 ```sh
-remote-au send --to 192.168.1.20:47000
+bash scripts/macos/install-launchagent.sh
+bash scripts/macos/uninstall-launchagent.sh
 ```
 
----
+正常卸载保留配对和数据，显式 `PURGE=1` 才删除默认运行目录内本应用文件。LaunchAgent 在用户登录后启动，退出后自动拉起；需要外置卷已挂载。
 
-## Commands
+Windows 安装器默认 `-Role send`，可用 `-Role server` 切换常驻服务器。Mac 安装器默认 `REMOTE_AU_ROLE=server`，可用 `REMOTE_AU_ROLE=send REMOTE_AU_SOURCE=mic` 改为采集端。切换服务器前先停止原服务器启动项。
 
-### `remote-au version`
-Print the CLI version and exit. `remote-au --version` is equivalent and works
-without initializing audio.
+Windows 登录任务以当前交互用户运行，适合访问桌面音频会话，无需保存密码：
 
-### `remote-au devices`
-List the local playback and capture devices with their indices, so you can pass
-`--device <index|name>` to `recv`/`send`. Also notes per-platform loopback support.
+```powershell
+.\scripts\windows\install-daemon.ps1 -BinarySource .\remote-au.exe
+# 导入邀请后：
+Start-ScheduledTask -TaskName remote-au-daemon
+# 卸载，保留配对：
+.\scripts\windows\uninstall-daemon.ps1
+```
 
-Use `remote-au devices --json` for machine-readable output. JSON is written to
-stdout; diagnostics are written to stderr.
+防火墙脚本是单独的管理员步骤，仅对本程序和 Private 网络添加 UDP 规则，不安装驱动、不改变默认音频设备。Windows 登录前不会运行音频采集。
 
-### `remote-au selftest`
-Capture the local microphone and play it straight back through the local speakers —
-a quick check that the audio backend works on this machine.
+## 验证
 
-### `remote-au recv` — the aggregator
-Listens for senders (TCP **and** UDP on the same port), mixes all active streams,
-and plays the result.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--addr` | `:47000` | Audio listen address (TCP + UDP). |
-| `--device` | auto | Playback device index or case-insensitive name substring (see `devices`). |
-| `--discovery-port` | `0` | UDP discovery port. `0` auto-selects the first available of `47001`, `48001`, `49001`; explicit `N` forces one port. |
-| `--name` | hostname | Name advertised to senders during discovery. |
-| `--no-discovery` | off | Disable the LAN discovery responder. |
-
-### `remote-au send` — a capture source
-Captures audio and streams it to a receiver.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--to` | *(discover)* | Receiver address, e.g. `192.168.1.20:47000`. Skips discovery. |
-| `--peer` | *(none)* | Require a discovered receiver with this name (safe disambiguator). |
-| `--source` | `mic` | Capture source: `mic` or `loopback` (system audio). |
-| `--transport` | `udp` | Audio transport: `udp` (low latency) or `tcp` (reliable). |
-| `--device` | auto | Capture device index or case-insensitive name substring (see `devices`). For `--source loopback` on Windows, this selects a playback endpoint. |
-| `--discover-timeout` | `1.5s` | How long to wait for discovery replies. |
-| `--discovery-port` | `0` | UDP discovery port. `0` queries `47001`, `48001`, `49001`; explicit `N` forces one port. |
-| `--name` | hostname | Name this sender uses during discovery. |
-
-### Global flags
-
-Apply to any subcommand, placed **before** it (e.g. `remote-au --verbose recv`):
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--rate` | `48000` | Sample rate (Hz). |
-| `--channels` | `2` | Channel count. |
-| `--frame-ms` | `10` | PCM packet duration (ms). |
-| `--verbose` | off | Compatibility alias for debug diagnostics and verbose audio-backend/per-stream stats logging. |
-| `--version` | off | Print the CLI version and exit. |
-| `--log-level` | `info` | Diagnostic log level: `debug`, `info`, `warn`, or `error`. |
-| `--log-format` | `text` | Diagnostic log format: `text` or `json`. |
-
-All endpoints must agree on `rate` / `channels`; the receiver rejects senders whose
-format does not match.
-
-Interactive status lines stay on stdout. Diagnostic logs use stderr, so commands
-such as `remote-au devices --json` can be consumed by scripts without filtering.
-
----
-
-## How discovery works
-
-- The **receiver** runs a UDP responder. By default it listens on the first
-  available discovery port from `47001`, `48001`, `49001`. When it receives a
-  discovery query, it responds with an announce containing its name, a stable
-  per-run instance ID, and the audio port.
-- The **sender**, when given no `--to`, queries all default discovery ports and
-  collects replies for `--discover-timeout`:
-  - **one** receiver found → connects automatically (and prints which one);
-  - **several** found → it lists them and asks you to pick with `--to` or `--peer`;
-  - **none** found → it tells you to use `--to`.
-
-**Trust model:** discovery trusts the local network — a single discovered receiver
-is connected to without a prompt. On an untrusted LAN, pin the target with `--to`
-or `--peer`. (Cryptographic peer authentication is intentionally out of scope.)
-
-## Transports
-
-| | UDP (default) | TCP (`--transport tcp`) |
-|---|---|---|
-| Latency | Lower — no retransmit stalls, no head-of-line blocking | Slightly higher under loss |
-| Packet loss | Dropped; concealed with silence (jitter buffer) | Retransmitted (can stall) |
-| Connection | Connectionless — survives receiver restarts | Connection-oriented |
-| When to use | Default; LAN audio | Lossy / firewalled networks needing reliability |
-
-The receiver always listens on both, so senders can choose freely.
-
-## Platform notes
-
-`recv` and `send` both work on all three desktop OSes. The only platform-specific
-concern is **capturing *system* audio** on the sender:
-
-| OS | Microphone | System audio (`--source loopback`) |
-|----|------------|------------------------------------|
-| **Windows** | ✅ | ✅ native WASAPI loopback |
-| **Linux** | ✅ | Select a PulseAudio/PipeWire **monitor** source as the capture device |
-| **macOS** | ✅ | Needs a virtual device such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) |
-
-Playback (what the receiver does) works everywhere with no extra setup.
-
-## Troubleshooting
-
-### Discovery finds nothing
-
-Firewalls and broadcast-isolated VLANs can block UDP discovery. Start the receiver
-with `remote-au recv`, note its address, then connect directly:
+合成音源、两个独立进程、故障注入及重启恢复检查：
 
 ```sh
-remote-au send --to 192.168.1.20:47000
+python3 tools/verify_daemon.py --binary /path/to/remote-au --output /path/to/evidence
+# 添加 --playback 后通过默认扬声器低音量播放测试音。
 ```
 
-Open the audio port for both TCP and UDP, plus the UDP discovery ports in use
-(`47001`, `48001`, `49001` by default, or your explicit `--discovery-port`).
-
-### No audio or rejected streams
-
-Run `remote-au devices` to confirm the expected playback/capture endpoints exist,
-and try `remote-au selftest` on the sender. All endpoints must use the same
-`--rate`, `--channels`, and `--frame-ms`; a receiver rejects streams with a
-different format.
-
-### System audio capture
-
-Windows uses native WASAPI loopback with `remote-au send --source loopback`. On
-macOS, install a virtual capture device such as BlackHole and choose it with
-`--device`. On Linux, choose a PulseAudio/PipeWire monitor source from
-`remote-au devices`.
-
-## Audio format
-
-Fixed for now: **48 kHz, 16-bit signed little-endian, 2 channels**, 10 ms packets
-(480 frames). Override with the global `--rate` / `--channels` / `--frame-ms` flags
-(all endpoints must match).
-
-## Protocol (summary)
-
-- **TCP audio** — magic `RAU1`: a handshake (format + name) then length-prefixed
-  audio frames (big-endian header, `seq`, `captureFrame`, payload). Stream framed.
-- **UDP audio** — magic `RAUU`: self-contained datagrams, `HELLO` (handshake) sent
-  periodically + `AUDIO` (seq / captureFrame / PCM). Payload capped to **960 bytes**
-  (5 ms) to stay under the Ethernet MTU and avoid IP fragmentation.
-- **Discovery** — magic `RAUD`: bounded `query` / `announce` datagrams.
-
-All length fields are validated and capped before any allocation.
-
-## Project layout
-
-```
-cmd/remote-au/          CLI entry point and subcommand wiring
-internal/audio/         miniaudio (malgo) capture / playback / device enumeration
-internal/protocol/      TCP stream framing + UDP datagram codec
-internal/transport/     sender + receiver (TCP accept loop & UDP receive loop)
-internal/mixer/         per-stream jitter buffer + N-stream mix engine
-internal/discovery/     UDP query/announce responder + finder
-internal/stats/         per-stream / aggregate statistics
-```
-
-The mix engine runs inside the playback device callback (the audio clock): it pulls
-exactly the requested number of frames from each stream's jitter buffer, sums them
-with per-source gain and a saturating limiter, and is strictly non-blocking and
-allocation-free in steady state.
-
-## Limitations / roadmap
-
-- **Raw PCM** on the wire (~1.5 Mbps per stream). Opus compression is a natural next
-  step for weak links and many simultaneous streams.
-- No per-stream **volume / mute** controls yet.
-- **Mobile** senders (Android / iOS) are not covered — that's a separate, larger
-  effort.
-- macOS system-audio capture needs a virtual device (see platform notes).
-
-## Releasing (maintainers)
-
-Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-and published to npm via **Trusted Publishing (OIDC)** — no npm token or secret.
-
-One-time setup on npmjs.com → `@leaperone/remote-au` → Settings → **Trusted Publisher**,
-add a GitHub Actions publisher:
-
-- **Organization/owner:** `leaperone`
-- **Repository:** `remote-au`
-- **Workflow filename:** `release.yml`
-
-Then cut a release by pushing a semver tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-CI builds the cgo binary on each platform's native runner, attaches them to a
-GitHub Release, and publishes `@leaperone/remote-au` to npm via OIDC (with build
-provenance). The package's install script then downloads the matching binary from
-that Release.
+软件 RTT 和缓冲统计不等同于声学端到端延迟。Windows CI 构建也不代表已验证真实硬件上的 WASAPI 或驱动行为。
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) © leaperone. The CLI is copyleft so networked
-improvements to this open component stay available to its users.
+[AGPL-3.0-or-later](LICENSE) © leaperone.
