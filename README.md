@@ -63,14 +63,14 @@ remote-au device --reset
 
 ## 常驻启动与回滚
 
-Mac 用户级 LaunchAgent：将二进制放在 `/Volumes/CodingSpace/remote-au-runtime/bin/remote-au`，先在 `/Volumes/CodingSpace/remote-au-runtime/config` 完成配对，再运行：
+Mac 用户级 LaunchAgent：将二进制放在 `/Volumes/CodingSpace/remote-au-runtime/bin/remote-au`，先在 `~/Library/Application Support/remote-au/config` 完成配对，再运行：
 
 ```sh
 bash scripts/macos/install-launchagent.sh
 bash scripts/macos/uninstall-launchagent.sh
 ```
 
-正常卸载保留配对和数据，显式 `PURGE=1` 才删除默认运行目录内本应用文件。LaunchAgent 在用户登录后启动，退出后自动拉起；需要外置卷已挂载。
+正常卸载保留配对和数据，显式 `PURGE=1` 才删除默认运行目录内本应用文件。LaunchAgent 在用户登录后启动，退出后自动拉起；需要外置卷已挂载。运行配置与少量日志使用用户 Library，工具链和二进制继续外置。macOS 若要求访问可移动宗卷，需本人允许；普通终端验证通过并不代表 LaunchAgent 已获得同样权限。
 
 Windows 安装器默认 `-Role send`，可用 `-Role server` 切换常驻服务器。Mac 安装器默认 `REMOTE_AU_ROLE=server`，可用 `REMOTE_AU_ROLE=send REMOTE_AU_SOURCE=mic` 改为采集端。切换服务器前先停止原服务器启动项。
 

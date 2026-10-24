@@ -20,6 +20,7 @@ pub struct JitterBuffer {
     play_seq: Option<u64>,
     play_off: usize,
     pub underruns: u64,
+    pub starvations: u64,
     pub losses: u64,
     pub discarded: u64,
     pub arrived: u64,
@@ -41,6 +42,7 @@ impl JitterBuffer {
             play_seq: None,
             play_off: 0,
             underruns: 0,
+            starvations: 0,
             losses: 0,
             discarded: 0,
             arrived: 0,
@@ -178,6 +180,7 @@ impl JitterBuffer {
                     .min(u128::from(u64::MAX)) as u64;
             } else if self.slots.range(seq..).next().is_none() {
                 self.underruns += (frames - done) as u64;
+                self.starvations += 1;
                 self.primed = false;
                 self.starved = true;
                 self.play_seq = None;

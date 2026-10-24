@@ -94,7 +94,14 @@ fn default_config_dir() -> PathBuf {
             .join("remote-au")
             .join("config");
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Library/Application Support/remote-au/config");
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)

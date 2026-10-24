@@ -452,6 +452,7 @@ fn receiver_control(
                         "packets": report.received,
                         "lost": report.lost,
                         "underruns": stream_underruns,
+                        "starvations": stats.iter().find(|s|s.id==report.id).map(|s|s.starvations),
                         "jitter_us": report.jitter_us,
                         "buffer_ms": report.buffer_ms,
                         "queued_ms": stats.iter().find(|s|s.id==report.id).map(|s|s.queued_ms),

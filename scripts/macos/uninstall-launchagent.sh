@@ -17,12 +17,11 @@ import shutil
 root = Path('/Volumes/CodingSpace/remote-au-runtime')
 if root.is_symlink():
     raise SystemExit('refusing to purge a symlink runtime root')
-for name in ('config', 'logs'):
-    path = root / name
+owned_dirs = [root/'config', root/'logs', Path.home()/'Library/Application Support/remote-au/config', Path.home()/'Library/Logs/remote-au']
+for path in owned_dirs:
     if path.is_symlink():
         raise SystemExit('refusing to purge symlink: ' + str(path))
-for name in ('config', 'logs'):
-    path = root / name
+for path in owned_dirs:
     if path.exists():
         shutil.rmtree(path)
 binary = root / 'bin/remote-au'
@@ -56,5 +55,5 @@ if [[ "${PURGE:-0}" == "1" ]]; then
   purge_owned_runtime "$VOLUME_ROOT"
   echo "Purged owned runtime files under ${VOLUME_ROOT} (bin/config/logs)."
 else
-  echo "Kept runtime data under ${VOLUME_ROOT} (export PURGE=1 to delete owned files at default root only)."
+  echo "Kept binary under ${VOLUME_ROOT}, config under ~/Library/Application Support/remote-au, and logs under ~/Library/Logs/remote-au. PURGE=1 deletes the default owned paths."
 fi

@@ -16,15 +16,19 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--runtime", type=Path, default=Path("/Volumes/CodingSpace/remote-au-runtime"))
+    ap.add_argument("--config-dir", type=Path)
     args = ap.parse_args()
     domain = f"gui/{os.getuid()}/{LABEL}"
-    runtime = Path("/Volumes/CodingSpace/remote-au-runtime")
+    runtime = args.runtime.resolve()
     binary = runtime / "bin/remote-au"
-    config = runtime / "config"
+    config = args.config_dir or Path.home() / "Library/Application Support/remote-au/config"
     records = []
 
     def run(*cmd, check=True):
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        environment = os.environ.copy()
+        environment.update({"REMOTE_AU_VOLUME_ROOT":str(runtime),"REMOTE_AU_BIN":str(binary),"REMOTE_AU_CONFIG_DIR":str(config),"REMOTE_AU_LOG_DIR":str(Path.home() / "Library/Logs/remote-au"),"REMOTE_AU_ROLE":"server"})
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=environment)
         if check and p.returncode:
             raise RuntimeError(f"{cmd[0]} failed: {p.stderr[-2000:]}")
         return p

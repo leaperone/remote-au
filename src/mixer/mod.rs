@@ -31,6 +31,7 @@ pub struct StreamStat {
     pub packets: u64,
     pub lost: u64,
     pub underruns: u64,
+    pub starvations: u64,
     pub buffer_ms: u32,
     pub buffered_packets: usize,
     pub queued_ms: f64,
@@ -206,6 +207,7 @@ impl Mixer {
                 packets: s.buffer.arrived,
                 lost: s.buffer.losses,
                 underruns: s.buffer.underruns,
+                starvations: s.buffer.starvations,
                 buffer_ms: s.buffer.target_ms(),
                 buffered_packets: s.buffer.buffered_packets(),
                 queued_ms: s.buffer.queued_frames() as f64 * 1000.0

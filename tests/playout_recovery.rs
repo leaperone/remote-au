@@ -26,3 +26,21 @@ fn playout_recovers_after_source_temporarily_stops_producing_packets() {
         "audio must resume without restarting the receiver"
     );
 }
+
+#[test]
+fn isolated_packet_loss_is_distinct_from_an_empty_source_queue() {
+    let mut buffer = JitterBuffer::new(4, 240);
+    buffer.set_target_packets(1);
+    let packet = 0x1234_i16.to_le_bytes().repeat(480);
+    assert!(buffer.push(1, &packet));
+    assert!(buffer.push(3, &packet));
+    let mut out = vec![0; 960 * 3];
+    buffer.pull(&mut out, 240 * 3);
+    assert_eq!(buffer.underruns, 240);
+    assert_eq!(
+        buffer.starvations, 0,
+        "more buffering cannot recover a packet that was lost"
+    );
+    buffer.pull(&mut out[..960], 240);
+    assert_eq!(buffer.starvations, 1);
+}

@@ -36,7 +36,7 @@ struct Peer {
     probe_recv_first_us: [u64; 5],
     probe_recv_last_us: [u64; 5],
     last_feedback: Option<Instant>,
-    underruns_mark: u64,
+    starvations_mark: u64,
     adapt: ReceiverAdapt,
 }
 
@@ -190,17 +190,17 @@ impl ReceiverEngine {
                 continue;
             }
             let id = hex::encode(session);
-            let underruns = mixer
-                .stats()
-                .into_iter()
-                .find(|s| s.id == id)
-                .map(|s| s.underruns)
-                .unwrap_or(0);
             let Some(peer) = self.peers.get_mut(&session) else {
                 continue;
             };
-            let delta = underruns.saturating_sub(peer.underruns_mark);
-            peer.underruns_mark = underruns;
+            let starvations = mixer
+                .stats()
+                .into_iter()
+                .find(|s| s.id == id)
+                .map(|s| s.starvations)
+                .unwrap_or(0);
+            let delta = starvations.saturating_sub(peer.starvations_mark);
+            peer.starvations_mark = starvations;
             let local = peer
                 .adapt
                 .observe(peer.jitter as u32, delta.min(u32::MAX as u64) as u32);
@@ -217,7 +217,7 @@ impl ReceiverEngine {
                 received: peer.received,
                 lost: peer.lost,
                 jitter_us: peer.jitter.min(u32::MAX as f64) as u32,
-                underruns: u32::try_from(underruns / 240).unwrap_or(u32::MAX),
+                underruns: u32::try_from(starvations).unwrap_or(u32::MAX),
                 buffer_ms: u16::try_from(buffer_ms).unwrap_or(u16::MAX),
                 probe_gen: peer.probe_gen,
                 probe_bytes: peer.probe_bytes,
@@ -420,7 +420,7 @@ impl Peer {
             probe_recv_first_us: [0; 5],
             probe_recv_last_us: [0; 5],
             last_feedback: None,
-            underruns_mark: 0,
+            starvations_mark: 0,
             adapt: ReceiverAdapt::new(),
         }
     }

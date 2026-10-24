@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Profile = 'Private'
+$FirewallProfile = 'Private'
 $Prefix = 'remote-au'
 
 if (-not (Test-Path -LiteralPath $ProgramPath)) {
@@ -31,8 +31,8 @@ function Add-ProgramUdpInboundRule([string] $Name, [int] $LocalPort) {
     }
     New-NetFirewallRule -DisplayName $Name -Direction Inbound -Action Allow -Protocol UDP `
         -Program $ProgramPath -LocalPort $LocalPort -RemoteAddress LocalSubnet `
-        -Profile $Profile -Description 'remote-au receiver LAN audio/discovery (program-scoped)' | Out-Null
-    Write-Host "Added $Name (inbound UDP local $LocalPort, $Profile, LocalSubnet)"
+        -Profile $FirewallProfile -Description 'remote-au receiver LAN audio/discovery (program-scoped)' | Out-Null
+    Write-Host "Added $Name (inbound UDP local $LocalPort, $FirewallProfile, LocalSubnet)"
 }
 
 function Add-ProgramUdpOutboundRemotePortRule([string] $Name, [int] $RemotePort) {
@@ -42,9 +42,9 @@ function Add-ProgramUdpOutboundRemotePortRule([string] $Name, [int] $RemotePort)
         return
     }
     New-NetFirewallRule -DisplayName $Name -Direction Outbound -Action Allow -Protocol UDP `
-        -Program $ProgramPath -RemotePort $RemotePort -Profile $Profile `
+        -Program $ProgramPath -RemotePort $RemotePort -Profile $FirewallProfile `
         -Description 'remote-au discovery/outbound to receiver ports (RemotePort)' | Out-Null
-    Write-Host "Added $Name (outbound UDP remote $RemotePort, $Profile)"
+    Write-Host "Added $Name (outbound UDP remote $RemotePort, $FirewallProfile)"
 }
 
 foreach ($p in $AudioPorts) {
