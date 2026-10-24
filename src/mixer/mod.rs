@@ -33,6 +33,8 @@ pub struct StreamStat {
     pub underruns: u64,
     pub buffer_ms: u32,
     pub buffered_packets: usize,
+    pub queued_ms: f64,
+    pub residence_us: u64,
 }
 
 pub struct Mixer {
@@ -206,6 +208,9 @@ impl Mixer {
                 underruns: s.buffer.underruns,
                 buffer_ms: s.buffer.target_ms(),
                 buffered_packets: s.buffer.buffered_packets(),
+                queued_ms: s.buffer.queued_frames() as f64 * 1000.0
+                    / self.format.sample_rate as f64,
+                residence_us: s.buffer.residence_us,
             })
             .collect()
     }

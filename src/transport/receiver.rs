@@ -217,7 +217,7 @@ impl ReceiverEngine {
                 received: peer.received,
                 lost: peer.lost,
                 jitter_us: peer.jitter.min(u32::MAX as f64) as u32,
-                underruns: u32::try_from(underruns).unwrap_or(u32::MAX),
+                underruns: u32::try_from(underruns / 240).unwrap_or(u32::MAX),
                 buffer_ms: u16::try_from(buffer_ms).unwrap_or(u16::MAX),
                 probe_gen: peer.probe_gen,
                 probe_bytes: peer.probe_bytes,

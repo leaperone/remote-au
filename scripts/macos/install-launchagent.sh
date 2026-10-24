@@ -58,7 +58,7 @@ if [[ -f "$PLIST" ]]; then
   [[ "$existing_label" == "$LABEL" ]] || die "refusing to overwrite a foreign or invalid LaunchAgent"
   [[ "$(plist_managed_from_file "$PLIST")" == "true" ]] || die "refusing to replace an unmanaged LaunchAgent"
   cp -p "$PLIST" "${PLIST}.previous"
-  if launchctl list 2>/dev/null | grep -q "${LABEL}"; then
+  if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
     launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
   fi
 fi
@@ -106,9 +106,9 @@ PY
 
 chmod 644 "$PLIST"
 
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/${LABEL}"
-launchctl kickstart -k "gui/$(id -u)/${LABEL}" || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+launchctl kickstart "gui/$(id -u)/${LABEL}" || true
 
 echo "Installed LaunchAgent ${LABEL}"
 echo "  binary: ${BIN}"

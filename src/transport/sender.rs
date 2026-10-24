@@ -19,6 +19,7 @@ pub struct SenderSnapshot {
     pub jitter_us: u32,
     pub estimated_goodput_bps: u64,
     pub target_buffer_ms: u32,
+    pub probe_diagnostics: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +45,7 @@ impl SenderSnapshot {
             "estimated_goodput_bps": self.estimated_goodput_bps,
             "goodput_basis": "paced_probe_floor",
             "target_buffer_ms": self.target_buffer_ms,
+            "probe_steps": self.probe_diagnostics,
         })
     }
 }
@@ -283,6 +285,12 @@ impl SenderEngine {
             jitter_us: self.jitter_us,
             estimated_goodput_bps: self.goodput_bps,
             target_buffer_ms: self.adapt.target_buffer_ms,
+            probe_diagnostics: (0..5).map(|i| json!({
+                "target_bps": crate::transport::adapt::PROBE_STEPS_BPS[i],
+                "received_payload_bytes": self.probe_bytes[i],
+                "send_span_us": span_us(self.probe_send_first_us[i],self.probe_send_last_us[i]),
+                "receive_span_us": self.probe_recv_span_us[i],
+            })).collect(),
         }
     }
 

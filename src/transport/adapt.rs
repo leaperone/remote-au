@@ -9,7 +9,7 @@ pub const PROBE_STEPS_BPS: [u64; 5] = [500_000, 1_000_000, 2_000_000, 4_000_000,
 pub const PROBE_PAYLOAD_BYTES: usize = 800;
 /// Full on-wire datagram size for one probe (header + AEAD + probe body).
 pub const PROBE_WIRE_BYTES: usize = 46 + 16 + 13 + PROBE_PAYLOAD_BYTES;
-pub const MIN_BUFFER_MS: u32 = 15;
+pub const MIN_BUFFER_MS: u32 = 20;
 pub const MAX_BUFFER_MS: u32 = 150;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

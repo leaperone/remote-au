@@ -454,6 +454,8 @@ fn receiver_control(
                         "underruns": stream_underruns,
                         "jitter_us": report.jitter_us,
                         "buffer_ms": report.buffer_ms,
+                        "queued_ms": stats.iter().find(|s|s.id==report.id).map(|s|s.queued_ms),
+                        "residence_us": stats.iter().find(|s|s.id==report.id).map(|s|s.residence_us),
                     })
                 })
                 .collect::<Vec<_>>();

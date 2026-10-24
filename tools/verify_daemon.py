@@ -186,6 +186,8 @@ def main():
         # Allow the next periodic bandwidth probe to observe the restored link.
         sample("recovered", receiver, sender)
         sample("recovered_next_probe", receiver, sender)
+        sample("recovered_final_probe", receiver, sender)
+        sample("recovered_steady", receiver, sender)
         s2 = spawn(second, "send", "--to", f"127.0.0.1:{port}", "--source", "synth", "--name", "acceptance-second")
         wait_status(second, s2)
         time.sleep(3)

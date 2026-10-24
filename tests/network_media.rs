@@ -216,7 +216,10 @@ fn adaptation_degrades_and_recovers_inside_buffer_bounds() {
     for _ in 0..3 {
         target = calm.observe(0, 0);
     }
-    assert!(target < 20 && target >= 15);
+    assert_eq!(
+        target, 20,
+        "stable links retain the 20 ms callback-safe minimum"
+    );
 }
 
 #[tokio::test]
