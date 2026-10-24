@@ -2,7 +2,11 @@
 
 将 Windows 的系统播放声音通过局域网传到接音箱的 Mac，支持多台采集端混音。Rust 版以常驻进程运行，发送端离线时接收端持续等待，恢复后自动连接。
 
-Rust 代码位于 `src/`，Go 代码保留在 `cmd/`、`internal/`，旧版使用说明见 [legacy-go.md](docs/legacy-go.md)。两版协议不同，不互通；现有 npm/Go 发布流程仍发布旧版，本 PR 不触发版本发布。
+Rust 代码位于 `src/`，Go 代码保留在 `cmd/`、`internal/`，旧版使用说明见 [legacy-go.md](docs/legacy-go.md)。两版协议不同，不互通。
+
+**下载 Rust 版二进制**（macOS Apple Silicon、Windows x64）：[GitHub Releases](https://github.com/leaperone/remote-au/releases) 中的 `remote-au-macos-arm64-<version>.tar.gz` 与 `remote-au-windows-x64-<version>.zip`（含 `scripts/`、文档与 `SHA256SUMS.txt`）。仓库内 `push` 的 `v*` 标签会触发 [.github/workflows/release.yml](.github/workflows/release.yml) 构建并上传 **draft** 发布资产。
+
+**npm / Go 为遗留渠道**：根目录 `package.json`（`@leaperone/remote-au`）与旧版 Go 构建仍面向 v0.3.0 及更早协议；与当前 Rust  daemon 不兼容，本仓库 Rust 发布 **不** 执行 `npm publish`。
 
 ## 构建
 
