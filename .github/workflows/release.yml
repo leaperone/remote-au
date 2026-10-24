@@ -1,19 +1,11 @@
 name: release
 
-# Cut a release by pushing a semver tag, e.g.:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Cut a release by pushing a semver tag that matches Cargo.toml, e.g.:
+#   git tag v0.4.0 && git push origin v0.4.0
 #
-# This builds the cgo binary on each platform's native runner, publishes them as
-# assets on a GitHub Release, then publishes the single npm package
-# @leaperone/remote-au via npm Trusted Publishing (OIDC) — no token required.
-# The package's postinstall downloads the matching binary from the Release.
-#
-# One-time npm setup (no secret needed):
-#   On npmjs.com -> @leaperone/remote-au -> Settings -> Trusted Publisher,
-#   add a GitHub Actions publisher:
-#     Organization/owner: leaperone
-#     Repository:         remote-au
-#     Workflow filename:  release.yml
+# Builds native Rust binaries (macOS Apple Silicon + Windows x64), runs locked
+# tests and Python proxy unit tests, publishes versioned archives and
+# SHA256SUMS.txt to a draft GitHub Release. Does not publish npm (legacy Go).
 
 on:
   push:
@@ -21,85 +13,122 @@ on:
       - 'v*'
 
 permissions:
-  contents: write   # create the GitHub Release
-  id-token: write   # OIDC for npm Trusted Publishing
+  contents: write
 
 jobs:
   build:
-    name: build ${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
-    runs-on: ${{ matrix.runner }}
+    name: build ${{ matrix.package }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14,         npm_platform: darwin, npm_arch: arm64, goos: darwin,  goarch: arm64 }
-          - { runner: ubuntu-latest,    npm_platform: linux,  npm_arch: x64,   goos: linux,   goarch: amd64 }
-          - { runner: ubuntu-24.04-arm, npm_platform: linux,  npm_arch: arm64, goos: linux,   goarch: arm64 }
-          - { runner: windows-latest,   npm_platform: win32,  npm_arch: x64,   goos: windows, goarch: amd64 }
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package: macos-arm64
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: windows-x64
+            archive_ext: zip
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.24'
-
-      - name: Install MinGW (Windows cgo toolchain)
-        if: matrix.npm_platform == 'win32'
-        run: choco install mingw -y --no-progress
-
-      - name: Build binary
+      - name: Verify tag matches Cargo.toml version
         shell: bash
-        env:
-          CGO_ENABLED: '1'
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          asset=remote-au-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
-          if [ "${{ matrix.npm_platform }}" = "win32" ]; then asset="$asset.exe"; fi
-          go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$asset" ./cmd/remote-au
-          ls -la "$asset"
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "$CARGO" ]; then
+            echo "Tag version ($TAG) does not match Cargo.toml ($CARGO)"
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
 
-      - name: Upload release asset artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          name: asset-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
-          path: remote-au-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}*
+          targets: ${{ matrix.target }}
+
+      - name: Test (locked)
+        run: cargo test --locked
+
+      - name: Verify impairment proxy routing
+        run: python -m unittest discover -s tools -p "test_*.py"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package release tree
+        shell: bash
+        run: |
+          python scripts/package-release.py \
+            --target "${{ matrix.target }}" \
+            --package "${{ matrix.package }}" \
+            --version "$VERSION" \
+            --commit "$GITHUB_SHA"
+
+      - name: Create versioned archive (macOS)
+        if: matrix.archive_ext == 'tar.gz'
+        run: |
+          set -euo pipefail
+          base="remote-au-${{ matrix.package }}-${VERSION}"
+          tar -czf "artifact/${base}.tar.gz" -C artifact "remote-au-${{ matrix.package }}"
+          ls -la artifact/
+
+      - name: Create versioned archive (Windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $base = "remote-au-${{ matrix.package }}-${env:VERSION}"
+          Compress-Archive -Path "artifact/remote-au-${{ matrix.package }}" -DestinationPath "artifact/$base.zip" -Force
+          Get-ChildItem artifact
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: archive-${{ matrix.package }}
+          path: |
+            artifact/remote-au-${{ matrix.package }}-*
           if-no-files-found: error
 
   publish:
-    name: GitHub Release + npm (OIDC)
+    name: draft GitHub Release
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+      - name: Resolve version from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
-        run: npm install -g npm@latest
-
-      - name: Download all release assets
+      - name: Download release archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: asset-*
+          pattern: archive-*
           path: release
           merge-multiple: true
 
-      - name: List release assets
-        run: ls -la release
+      - name: Aggregate SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          ls -la
+          : > SHA256SUMS.txt
+          for f in remote-au-*; do
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
 
-      - name: Create GitHub Release with binaries
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: release/*
-          generate_release_notes: true
-
-      - name: Set package version from tag
-        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
-
-      - name: Publish to npm (Trusted Publishing / OIDC)
-        run: npm publish
+      - name: Create draft release (gh CLI)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            release/remote-au-macos-arm64-"${VERSION}".tar.gz \
+            release/remote-au-windows-x64-"${VERSION}".zip \
+            release/SHA256SUMS.txt

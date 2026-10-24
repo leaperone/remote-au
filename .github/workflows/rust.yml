@@ -1,0 +1,79 @@
+name: Rust daemon
+
+on:
+  push:
+    branches: [main, 'feat/rust-daemon-*']
+    paths: ['Cargo.*', '.cargo/**', 'src/**', 'tests/**', 'tools/**', 'scripts/macos/**', 'scripts/windows/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['Cargo.*', '.cargo/**', 'src/**', 'tests/**', 'tools/**', 'scripts/macos/**', 'scripts/windows/**', '.github/workflows/rust.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Rust (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test native platform
+        run: cargo test --locked
+      - name: Check PowerShell scripts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem scripts/windows/*.ps1 | ForEach-Object {
+            $parseErrors = $null
+            $parseTokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { $parseErrors | Write-Error; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+      - name: Check macOS scripts
+        if: runner.os == 'macOS'
+        run: bash -n scripts/macos/install-launchagent.sh && bash -n scripts/macos/uninstall-launchagent.sh
+      - name: Verify impairment proxy routing
+        run: python -m unittest discover -s tools -p "test_*.py"
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package binary and installer scripts
+        shell: python
+        env:
+          RAU_TARGET: ${{ matrix.target }}
+          RAU_PACKAGE: ${{ matrix.package }}
+        run: |
+          import hashlib, os, pathlib, shutil
+          target = os.environ['RAU_TARGET']
+          package = os.environ['RAU_PACKAGE']
+          out = pathlib.Path('artifact') / ('remote-au-' + package)
+          out.mkdir(parents=True)
+          name = 'remote-au.exe' if package == 'windows-x64' else 'remote-au'
+          shutil.copy2(pathlib.Path('target') / target / 'release' / name, out / name)
+          shutil.copytree('scripts/windows' if package == 'windows-x64' else 'scripts/macos', out / 'scripts')
+          shutil.copytree('docs', out / 'docs')
+          shutil.copy2('README.md', out / 'README.md')
+          shutil.copy2('LICENSE', out / 'LICENSE')
+          (out / 'BUILD.txt').write_text('commit=' + os.environ['GITHUB_SHA'] + '\ntarget=' + target + '\n')
+          files = sorted(p for p in out.rglob('*') if p.is_file())
+          (out / 'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + str(p.relative_to(out)).replace('\\', '/') + '\n' for p in files))
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remote-au-${{ matrix.package }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
